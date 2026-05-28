@@ -70,6 +70,8 @@ static bool isCurrentlyPlannableOp(StringRef opName) {
       .Case("texp", true)
       .Case("texpands", true)
       .Cases("trowexpandmul", "trowexpanddiv", true)
+      .Cases("trowsum", "trowmax", "trowmin", true)
+      .Cases("tcolsum", "tcolmax", "tcolmin", true)
       .Default(false);
 }
 

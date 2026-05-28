@@ -6,8 +6,8 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// Guards FusionPlan's conservative dynamic-shape behavior: dynamic valid-shape
-// tile ops must not receive pto.fusion.* metadata.
+// Guards FusionPlan's dynamic-shape constraint behavior: dynamic valid-shape
+// tile ops with equivalent shape constraints may receive pto.fusion.* metadata.
 //
 // RUN: ptoas --pto-backend=vpto --pto-arch=a5 --pto-level=level2 --enable-op-fusion --emit-pto-ir %s --mlir-print-ir-after=pto-fusion-plan -o /dev/null 2>&1 | FileCheck %s
 
@@ -28,7 +28,9 @@ module {
 // CHECK: // -----// IR Dump After FusionPlan (pto-fusion-plan) //----- //
 // CHECK-LABEL: func.func @fusion_plan_dynamic_shape_negative(
 // CHECK: pto.tadd ins(%arg0, %arg0
-// CHECK-NOT: pto.fusion.group_id
+// CHECK-SAME: pto.fusion.group_id = 0 : i64
+// CHECK-SAME: pto.fusion.order = 0 : i64
 // CHECK: pto.tmul ins(%0, %arg0
-// CHECK-NOT: pto.fusion.group_id
+// CHECK-SAME: pto.fusion.group_id = 0 : i64
+// CHECK-SAME: pto.fusion.order = 1 : i64
 // CHECK: return

@@ -1,0 +1,42 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root of the software repository for the full text of the License.
+
+// Guards shape-constraint planning for a simple tadd -> tmul -> trowsum chain:
+// all three ops share the same input iteration domain and are planned together.
+//
+// RUN: ptoas --pto-backend=vpto --pto-arch=a5 --pto-level=level2 --enable-op-fusion --emit-pto-ir %s --mlir-print-ir-after=pto-fusion-plan -o /dev/null 2>&1 | FileCheck %s
+
+module {
+  func.func @prefusion_analysis_tadd_tmul_trowsum(
+      %lhs: !pto.tile_buf<vec, 32x32xf32>,
+      %rhs: !pto.tile_buf<vec, 32x32xf32>,
+      %scale: !pto.tile_buf<vec, 32x32xf32>) {
+    %add = pto.alloc_tile : !pto.tile_buf<vec, 32x32xf32>
+    %mul = pto.alloc_tile : !pto.tile_buf<vec, 32x32xf32>
+    %reduceTmp = pto.alloc_tile : !pto.tile_buf<vec, 32x32xf32>
+    %reduce = pto.alloc_tile : !pto.tile_buf<vec, 32x8xf32, valid=32x1>
+
+    pto.tadd ins(%lhs, %rhs : !pto.tile_buf<vec, 32x32xf32>, !pto.tile_buf<vec, 32x32xf32>) outs(%add : !pto.tile_buf<vec, 32x32xf32>)
+    pto.tmul ins(%add, %scale : !pto.tile_buf<vec, 32x32xf32>, !pto.tile_buf<vec, 32x32xf32>) outs(%mul : !pto.tile_buf<vec, 32x32xf32>)
+    pto.trowsum ins(%mul, %reduceTmp : !pto.tile_buf<vec, 32x32xf32>, !pto.tile_buf<vec, 32x32xf32>) outs(%reduce : !pto.tile_buf<vec, 32x8xf32, valid=32x1>)
+    return
+  }
+}
+
+// CHECK: // -----// IR Dump After FusionPlan (pto-fusion-plan) //----- //
+// CHECK-LABEL: func.func @prefusion_analysis_tadd_tmul_trowsum
+// CHECK: pto.tadd ins(%arg0, %arg1
+// CHECK-SAME: pto.fusion.group_id = 0 : i64
+// CHECK-SAME: pto.fusion.order = 0 : i64
+// CHECK: pto.tmul ins(%0, %arg2
+// CHECK-SAME: pto.fusion.group_id = 0 : i64
+// CHECK-SAME: pto.fusion.order = 1 : i64
+// CHECK: pto.trowsum
+// CHECK-SAME: pto.fusion.group_id = 0 : i64
+// CHECK-SAME: pto.fusion.order = 2 : i64
+// CHECK: return
