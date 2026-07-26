@@ -22,6 +22,7 @@ config.python_executable = "@Python3_EXECUTABLE@"
 # config.enable_bindings_python = @MLIR_ENABLE_BINDINGS_PYTHON@
 config.ptoir_src_root = "@CMAKE_SOURCE_DIR@"
 config.ptoir_obj_root = "@CMAKE_BINARY_DIR@"
+config.pto_enable_vfsim_costmodel = "@PTO_ENABLE_VFSIM_COSTMODEL@" == "ON"
 
 import lit.llvm
 lit.llvm.initialize(lit_config, config)

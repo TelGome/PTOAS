@@ -44,6 +44,9 @@ config.ptoir_tools_dir = os.path.join(config.ptoir_obj_root, 'tools/ptoas')
 config.substitutions.append(('%PATH%', config.environment['PATH']))
 config.substitutions.append(('%shlibext', config.llvm_shlib_ext))
 
+if getattr(config, 'pto_enable_vfsim_costmodel', False):
+    config.available_features.add('vfsim-costmodel')
+
 llvm_config.with_system_environment(
     ['HOME', 'INCLUDE', 'LIB', 'TMP', 'TEMP',
      'ASCEND_HOME_PATH', 'ASCEND_OPP_PATH', 'ASCEND_AICPU_PATH',

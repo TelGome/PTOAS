@@ -580,6 +580,21 @@ static llvm::cl::opt<bool> enableShapeInference(
                   "to fall back to static/direct-bound inference."),
     llvm::cl::init(true));
 
+static llvm::cl::opt<bool> enableVfSimCostmodelOptimization(
+    "enable-vfsim-costmodel-optimization",
+    llvm::cl::desc("Enable optional VfSimulator costmodel-driven fusion "
+                   "optimization. Requires the A5 tile-fusion pipeline. On "
+                   "VPTO this also enables consumption of generated unroll "
+                   "attributes after low-level loop fusion."),
+    llvm::cl::init(false));
+
+static llvm::cl::opt<bool> dumpVfSimUnrollTest(
+    "dump-vfsim-unroll-test",
+    llvm::cl::desc("Print VfSimulator unroll candidate timings for accepted "
+                   "fusion groups. Debug dump only; does not enable or disable "
+                   "the VfSimulator planner."),
+    llvm::cl::init(false));
+
 static llvm::cl::opt<bool> disableInferLayout(
     "disable-infer-layout",
     llvm::cl::desc("Disable PTO layout inference pass (static-only)"),
@@ -2762,6 +2777,14 @@ lowerPTOToVPTOBackend(PassManager &pm, ModuleOp module,
         pto::createPTOFusionPredicateElisionPass());
     kernelModulePM.addNestedPass<mlir::func::FuncOp>(
         pto::createPTOFusionLoadStoreElisionPass());
+    if (enableVfSimCostmodelOptimization) {
+      kernelModulePM.addNestedPass<mlir::func::FuncOp>(
+          pto::createPTOUnrollAfterLoopFusionPass());
+      kernelModulePM.addPass(mlir::createCanonicalizerPass());
+      kernelModulePM.addPass(mlir::createCSEPass());
+      kernelModulePM.addNestedPass<mlir::func::FuncOp>(
+          pto::createPTOFusionLoadStoreElisionPass());
+    }
     kernelModulePM.addNestedPass<mlir::func::FuncOp>(
         pto::createPTOFlattenFusionRegionPass());
     kernelModulePM.addPass(mlir::createCSEPass());
@@ -2929,6 +2952,21 @@ int mlir::pto::compilePTOASModule(
       enableA5FusionPath && effectiveBackend == PTOBackend::EmitC;
   const bool enableA5VPTOFusionPath =
       enableA5FusionPath && effectiveBackend == PTOBackend::VPTO;
+
+  if (enableVfSimCostmodelOptimization &&
+      !(enableA5EmitCFusionPath || enableA5VPTOFusionPath)) {
+    llvm::errs() << "Warning: --enable-vfsim-costmodel-optimization is ignored "
+                    "because the A5 tile-fusion pipeline is not enabled; "
+                    "requires --pto-arch=a5, --pto-level=level2 or level3, "
+                    "and op fusion enabled.\n";
+  }
+  if (enableVfSimCostmodelOptimization && enableA5EmitCFusionPath) {
+    llvm::errs() << "Warning: --enable-vfsim-costmodel-optimization may "
+                    "annotate costmodel attributes on the EmitC fusion path, "
+                    "but current VfSim unroll attributes are consumed only by "
+                    "the VPTO backend; use --pto-backend=vpto for unroll "
+                    "consumption.\n";
+  }
 
   bool invalidAutoSyncTailHint = false;
   module->walk([&](mlir::func::FuncOp func) {
@@ -3114,6 +3152,9 @@ int mlir::pto::compilePTOASModule(
   // so it takes no option here.
   pto::FusionPlanOptions fusionPlanOpts;
   fusionPlanOpts.enableShapeInference = enableShapeInference;
+  fusionPlanOpts.enableVfSimCostmodelOptimization =
+      enableVfSimCostmodelOptimization;
+  fusionPlanOpts.dumpVfSimUnrollTest = dumpVfSimUnrollTest;
   if (!isA2A3 && enableA5EmitCFusionPath) {
     pm.addNestedPass<mlir::func::FuncOp>(
         pto::createFusionPlanPass(fusionPlanOpts));

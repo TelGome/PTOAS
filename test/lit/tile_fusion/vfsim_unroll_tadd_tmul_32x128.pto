@@ -1,0 +1,107 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS IS PROVIDED ON AN "AS IS" BASIS, WARRANTIES OF ANY KIND, EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root of the software repository for the full text of the License.
+
+// A=B+C; D=A*B elementwise fusion case.
+// Guards the VfSim IR planner col-unroll path on a small 32x128 tile.
+// The pinned VfSimulator commit is expected to choose col_unroll_factor = 2
+// for this case, expanding the fused inner loop to exercise the PTOAS
+// planner-to-region-to-unroll plumbing. If a future VfSimulator submodule
+// update changes that costmodel decision, update this expected value together
+// with the submodule bump.
+//
+//   (1) REGION  -- PTOAS forms one fusion_region containing tadd + tmul, and
+//       VfSim writes col_unroll_factor = 2.
+//   (2) LLF     -- pto-low-level-loop-fusion lowers the group to nested loops:
+//       row trip 32, col trip 2. The inner col loop still carries one vadd and
+//       one vmul before unroll.
+//   (3) UNROLL  -- pto-unroll-after-loop-fusion consumes col_unroll_factor=2,
+//       fully unrolls the inner col loop, and leaves two vadd/vmul copies in
+//       the row loop body.
+//
+// REQUIRES: vfsim-costmodel
+// RUN: ptoas --pto-backend=vpto --pto-arch=a5 --pto-level=level2 --enable-op-fusion --enable-vfsim-costmodel-optimization --emit-pto-ir %s --mlir-print-ir-after=pto-fusion-region-gen -o /dev/null 2>&1 | FileCheck %s --check-prefix=REGION
+// RUN: ptoas --pto-backend=vpto --pto-arch=a5 --pto-level=level2 --enable-op-fusion --enable-vfsim-costmodel-optimization --emit-vpto %s --mlir-print-ir-after=pto-low-level-loop-fusion -o /dev/null 2>&1 | FileCheck %s --check-prefix=LLF
+// RUN: ptoas --pto-backend=vpto --pto-arch=a5 --pto-level=level2 --enable-op-fusion --enable-vfsim-costmodel-optimization --emit-vpto %s --mlir-print-ir-after=pto-unroll-after-loop-fusion -o /dev/null 2>&1 | FileCheck %s --check-prefix=UNROLL
+
+module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<vector>} {
+  func.func @vfsim_unroll_tadd_tmul_32x128(
+      %b_ptr: !pto.ptr<f32>,
+      %c_ptr: !pto.ptr<f32>,
+      %d_ptr: !pto.ptr<f32>) attributes {pto.kernel} {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c32 = arith.constant 32 : index
+    %c128 = arith.constant 128 : index
+
+    %b_view = pto.make_tensor_view %b_ptr,
+      shape = [%c32, %c128], strides = [%c128, %c1]
+      : !pto.tensor_view<?x?xf32>
+    %c_view = pto.make_tensor_view %c_ptr,
+      shape = [%c32, %c128], strides = [%c128, %c1]
+      : !pto.tensor_view<?x?xf32>
+    %d_view = pto.make_tensor_view %d_ptr,
+      shape = [%c32, %c128], strides = [%c128, %c1]
+      : !pto.tensor_view<?x?xf32>
+    %b_part = pto.partition_view %b_view,
+      offsets = [%c0, %c0], sizes = [%c32, %c128]
+      : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<32x128xf32>
+    %c_part = pto.partition_view %c_view,
+      offsets = [%c0, %c0], sizes = [%c32, %c128]
+      : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<32x128xf32>
+    %d_part = pto.partition_view %d_view,
+      offsets = [%c0, %c0], sizes = [%c32, %c128]
+      : !pto.tensor_view<?x?xf32> -> !pto.partition_tensor_view<32x128xf32>
+
+    %b = pto.alloc_tile : !pto.tile_buf<vec, 32x128xf32>
+    %c = pto.alloc_tile : !pto.tile_buf<vec, 32x128xf32>
+    %a = pto.alloc_tile : !pto.tile_buf<vec, 32x128xf32>
+    %d = pto.alloc_tile : !pto.tile_buf<vec, 32x128xf32>
+
+    pto.tload ins(%b_part : !pto.partition_tensor_view<32x128xf32>)
+              outs(%b : !pto.tile_buf<vec, 32x128xf32>)
+    pto.tload ins(%c_part : !pto.partition_tensor_view<32x128xf32>)
+              outs(%c : !pto.tile_buf<vec, 32x128xf32>)
+    pto.tadd ins(%b, %c : !pto.tile_buf<vec, 32x128xf32>, !pto.tile_buf<vec, 32x128xf32>)
+             outs(%a : !pto.tile_buf<vec, 32x128xf32>)
+    pto.tmul ins(%a, %b : !pto.tile_buf<vec, 32x128xf32>, !pto.tile_buf<vec, 32x128xf32>)
+             outs(%d : !pto.tile_buf<vec, 32x128xf32>)
+    pto.tstore ins(%d : !pto.tile_buf<vec, 32x128xf32>)
+               outs(%d_part : !pto.partition_tensor_view<32x128xf32>)
+    return
+  }
+}
+
+// REGION-LABEL: func.func @vfsim_unroll_tadd_tmul_32x128(
+// REGION: pto.fusion_region {
+// REGION: pto.tadd
+// REGION: pto.tmul
+// REGION: pto.yield(%{{.*}}) : (!pto.tile_buf<vec, 32x128xf32>) -> ()
+// REGION: } {pto.fusion.col_unroll_factor = 2 : i64, pto.fusion.group_id = 0 : i64, pto.fusion.row_unroll_factor = 1 : i64} : !pto.tile_buf<vec, 32x128xf32>
+
+// LLF-LABEL: func.func @vfsim_unroll_tadd_tmul_32x128(
+// LLF: pto.fusion_region {
+// LLF: scf.for %{{.*}} = %{{.*}} to %c32{{(_[0-9]+)?}} step %c1{{(_[0-9]+)?}} {
+// LLF: scf.for %{{.*}} = %{{.*}} to %c128{{(_[0-9]+)?}} step %c64{{(_[0-9]+)?}}
+// LLF: pto.vadd
+// LLF: pto.vmul
+// LLF-NOT: pto.vadd
+// LLF-NOT: pto.vmul
+// LLF: pto.yield
+// LLF: } {pto.fusion.col_unroll_factor = 2 : i64, pto.fusion.group_id = 0 : i64, pto.fusion.row_unroll_factor = 1 : i64} : !pto.tile_buf<vec, 32x128xf32>
+
+// UNROLL-LABEL: func.func @vfsim_unroll_tadd_tmul_32x128(
+// UNROLL: pto.fusion_region {
+// UNROLL: scf.for %{{.*}} = %{{.*}} to %c32 step %c1
+// UNROLL-NOT: step %c64
+// UNROLL: pto.vadd
+// UNROLL: pto.vmul
+// UNROLL: pto.vadd
+// UNROLL: pto.vmul
+// UNROLL-NOT: pto.vadd
+// UNROLL-NOT: pto.vmul
+// UNROLL: } {pto.fusion.col_unroll_factor = 1 : i64, pto.fusion.group_id = 0 : i64, pto.fusion.row_unroll_factor = 1 : i64} : !pto.tile_buf<vec, 32x128xf32>

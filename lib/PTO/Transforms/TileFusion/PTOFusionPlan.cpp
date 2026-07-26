@@ -22,6 +22,10 @@
 
 #include <algorithm>
 
+#ifdef PTO_ENABLE_VFSIM_IR_PLANNER
+#include "native/IRPlanner.h"
+#endif
+
 namespace mlir {
 namespace pto {
 // Passes.h (included above) pulls in the global GEN_PASS_DECL block, which
@@ -41,6 +45,10 @@ namespace {
 static constexpr llvm::StringLiteral kFusionGroupIdAttr =
     "pto.fusion.group_id";
 static constexpr llvm::StringLiteral kFusionOrderAttr = "pto.fusion.order";
+static constexpr llvm::StringLiteral kFusionRowUnrollAttr =
+    "pto.fusion.row_unroll_factor";
+static constexpr llvm::StringLiteral kFusionColUnrollAttr =
+    "pto.fusion.col_unroll_factor";
 
 struct PlannedFusionGroup {
   SmallVector<const pto::FusionComputeNode *, 8> members;
@@ -521,7 +529,22 @@ static void clearPlanningAttrs(func::FuncOp func) {
   func.walk([](Operation *op) {
     op->removeAttr(kFusionGroupIdAttr);
     op->removeAttr(kFusionOrderAttr);
+    op->removeAttr(kFusionRowUnrollAttr);
+    op->removeAttr(kFusionColUnrollAttr);
   });
+}
+
+static LogicalResult runVfSimFusionPlanner(func::FuncOp func,
+                                           bool dumpCandidates) {
+#ifdef PTO_ENABLE_VFSIM_IR_PLANNER
+  vfsim::PlannerOptions options;
+  options.dumpCandidates = dumpCandidates;
+  return vfsim::planTileFusionIR(func.getOperation(), options);
+#else
+  return func.emitError()
+         << "--enable-vfsim-costmodel-optimization requires configuring PTOAS with "
+            "-DPTO_ENABLE_VFSIM_COSTMODEL=ON";
+#endif
 }
 
 struct FusionPlanPass : public pto::impl::FusionPlanBase<FusionPlanPass> {
@@ -565,6 +588,12 @@ struct FusionPlanPass : public pto::impl::FusionPlanBase<FusionPlanPass> {
       SmallVector<PlannedFusionGroup, 8> groups =
           strategyEngine.planBlock(planningCtx, costModel);
       assignStableGroupMetadata(groups, ctx, nextGroupId);
+    }
+
+    if (enableVfSimCostmodelOptimization &&
+        failed(runVfSimFusionPlanner(func, dumpVfSimUnrollTest))) {
+      signalPassFailure();
+      return;
     }
 
     // The fusion metadata we annotate (group_id/order) is a planning *output*;

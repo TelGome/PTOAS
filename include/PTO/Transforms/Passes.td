@@ -280,7 +280,17 @@ def FusionPlan : Pass<"pto-fusion-plan", "func::FuncOp"> {
            "iteration-domain inference.  Only FusionPlan consumes this option; "
            "FusionRegionGen consumes only the shared pre-fusion dataflow graph "
            "(cached by the analysis manager) and never consults iteration-domain "
-           "classes, so it does not need the option.">
+           "classes, so it does not need the option.">,
+    Option<"enableVfSimCostmodelOptimization",
+           "enable-vfsim-costmodel-optimization",
+           "bool", /*default=*/"false",
+           "Invoke the optional VfSimulator costmodel planner after PTOAS has "
+           "emitted FusionPlan group/order metadata.">,
+    Option<"dumpVfSimUnrollTest", "dump-vfsim-unroll-test",
+           "bool", /*default=*/"false",
+           "Print VfSimulator unroll candidate timings for accepted fusion "
+           "groups. This is a debug dump only and does not enable or disable "
+           "the VfSimulator planner.">
   ];
 }
 
@@ -994,6 +1004,20 @@ def PTOFusionLoadStoreElision
     cleanup for non-escaping fusion-region internal buffers.
   }];
   let constructor = "mlir::pto::createPTOFusionLoadStoreElisionPass()";
+  let dependentDialects = ["mlir::func::FuncDialect", "mlir::pto::PTODialect",
+                           "mlir::arith::ArithDialect",
+                           "mlir::scf::SCFDialect"];
+}
+
+def PTOUnrollAfterLoopFusion
+    : Pass<"pto-unroll-after-loop-fusion", "func::FuncOp"> {
+  let summary = "Partial-unroll the innermost scf.for inside pto.fusion_region "
+                "after PTOLowLevelLoopFusion (divisible trip count only)";
+  let description = [{
+    Partial-unrolls the loop nests inside `pto.fusion_region` according to the
+    unroll factors supplied by the cost model.
+  }];
+  let constructor = "mlir::pto::createPTOUnrollAfterLoopFusionPass()";
   let dependentDialects = ["mlir::func::FuncDialect", "mlir::pto::PTODialect",
                            "mlir::arith::ArithDialect",
                            "mlir::scf::SCFDialect"];

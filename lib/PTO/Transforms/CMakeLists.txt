@@ -23,6 +23,7 @@ add_mlir_dialect_library(PTOTransforms
   TileFusion/PTOLowLevelLoopFusion.cpp
   TileFusion/PTOFusionPredicateElision.cpp
   TileFusion/PTOFusionLoadStoreElision.cpp
+  TileFusion/PTOUnrollAfterLoopFusion.cpp
   TileFusion/PTOFlattenFusionRegion.cpp
   VPTOLLVMEmitter.cpp
   VPTOCANN900LLVMEmitter.cpp
@@ -149,3 +150,19 @@ target_include_directories(PTOTransforms INTERFACE
   $<BUILD_INTERFACE:${PROJECT_BINARY_DIR}/include>
   $<INSTALL_INTERFACE:include>
 )
+
+if(TARGET vfsim::native_core)
+  target_link_libraries(PTOTransforms PRIVATE $<BUILD_INTERFACE:vfsim::native_core>)
+  if(TARGET obj.PTOTransforms)
+    target_link_libraries(obj.PTOTransforms PRIVATE $<BUILD_INTERFACE:vfsim::native_core>)
+  endif()
+endif()
+
+if(TARGET vfsim::ir_planner)
+  target_link_libraries(PTOTransforms PRIVATE $<BUILD_INTERFACE:vfsim::ir_planner>)
+  target_compile_definitions(PTOTransforms PRIVATE PTO_ENABLE_VFSIM_IR_PLANNER=1)
+  if(TARGET obj.PTOTransforms)
+    target_link_libraries(obj.PTOTransforms PRIVATE $<BUILD_INTERFACE:vfsim::ir_planner>)
+    target_compile_definitions(obj.PTOTransforms PRIVATE PTO_ENABLE_VFSIM_IR_PLANNER=1)
+  endif()
+endif()

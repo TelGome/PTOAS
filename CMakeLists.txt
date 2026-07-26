@@ -237,6 +237,8 @@ include(CTest)
 # 开启 Python 绑定选项
 option(PTO_ENABLE_PYTHON_BINDING "Enable Python bindings" ON)
 
+include(cmake/VfSimulator.cmake)
+
 if(PTO_ENABLE_PYTHON_BINDING)
   find_package(Python3 COMPONENTS Interpreter Development.Module REQUIRED)
   find_package(pybind11 CONFIG REQUIRED)
