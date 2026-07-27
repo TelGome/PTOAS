@@ -126,6 +126,7 @@ add_mlir_dialect_library(PTOTransforms
   MLIRTransforms
   MLIRTensorDialect
   MLIRSCFDialect
+  MLIRSCFUtils
   MLIRVectorDialect
   MLIRParser
   MLIRArithTransforms

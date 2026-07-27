@@ -572,6 +572,15 @@ static llvm::cl::opt<llvm::cl::boolOrDefault> enableOpFusion(
                    "annotation; VPTO uses fusion-region lifecycle."),
     llvm::cl::init(llvm::cl::BOU_UNSET));
 
+static llvm::cl::opt<bool> enableUnrollAfterLoopFusion(
+    "enable-unroll-after-loop-fusion",
+    llvm::cl::desc("Partial-unroll the innermost scf.for in pto.fusion_region by "
+                   "the cost-model factor. VPTO backend only; consumes "
+                   "pto.fusion.row/col_unroll_factor, which is produced by "
+                   "--enable-vfsim-costmodel-optimization. Requires --pto-arch=a5 "
+                   "and --enable-op-fusion."),
+    llvm::cl::init(false));
+
 static llvm::cl::opt<bool> enableShapeInference(
     "enable-shape-inference",
     llvm::cl::desc("Enable shape inference (ShapeConstraintSolver) for A5 tile "
@@ -2943,6 +2952,23 @@ int mlir::pto::compilePTOASModule(
   if (requestedEnableOpFusion && effectiveLevel == PTOBuildLevel::Level1) {
     llvm::errs() << "Warning: --enable-op-fusion=true is ignored because "
                     "--pto-level=level2 or level3 is required.\n";
+  }
+
+  if (enableUnrollAfterLoopFusion && !(opFusionEnabled && arch == "a5")) {
+    llvm::errs() << "Error: --enable-unroll-after-loop-fusion requires "
+                    "--pto-arch=a5 and --enable-op-fusion.\n";
+    return 1;
+  }
+  if (enableUnrollAfterLoopFusion && effectiveBackend != PTOBackend::VPTO) {
+    llvm::errs() << "Error: --enable-unroll-after-loop-fusion requires "
+                    "--pto-backend=vpto; the pass is VPTO-only and is not "
+                    "inserted under other backends.\n";
+    return 1;
+  }
+  if (enableUnrollAfterLoopFusion && !enableVfSimCostmodelOptimization) {
+    llvm::errs() << "Warning: --enable-unroll-after-loop-fusion consumes "
+                    "pto.fusion.row/col_unroll_factor, which is produced by "
+                    "--enable-vfsim-costmodel-optimization.\n";
   }
 
   const bool enableA5FusionPath =
