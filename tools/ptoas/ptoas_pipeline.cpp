@@ -816,8 +816,6 @@ static void prepareVPTOForEmission(OpPassManager &kernelModulePM,
   kernelModulePM.addNestedPass<func::FuncOp>(
       pto::createVPTOGuardedLICMPass());
   kernelModulePM.addPass(createLoopInvariantCodeMotionPass());
-  kernelModulePM.addNestedPass<func::FuncOp>(
-      pto::createPTONarrowVPTOLoopCountersPass());
   kernelModulePM.addPass(createCanonicalizerPass());
   kernelModulePM.addPass(createCSEPass());
   // SoftOps are materialized only after all VPTO optimization and layout
@@ -836,7 +834,19 @@ static void prepareVPTOForEmission(OpPassManager &kernelModulePM,
     options.maxUnrollFactor = 8;
     options.dumpCandidates = dumpVfSimCostmodel || dumpVfSimUnrollTest;
     kernelModulePM.addPass(pto::createPTOVfSimUnrollPlannerPass(options));
+    kernelModulePM.addNestedPass<func::FuncOp>(
+        pto::createPTOUnrollLoopsPass());
+    kernelModulePM.addPass(createSCCPPass());
+    kernelModulePM.addPass(createCanonicalizerPass());
+    kernelModulePM.addPass(createCSEPass());
   }
+  // Keep counters in index form until VfSim-selected unroll factors have been
+  // consumed. The narrowing pass rewrites index loops to i16 loops, while the
+  // native MLIR unroll utility used above requires index induction variables.
+  // It remains outside the optional planner block so ordinary VPTO builds keep
+  // the counter-narrowing optimization when VfSim is disabled.
+  kernelModulePM.addNestedPass<func::FuncOp>(
+      pto::createPTONarrowVPTOLoopCountersPass());
   if (vptoSchedulerMode != VPTOSchedulerCLIMode::Off) {
     pto::VPTOSchedulerOptions schedulerOptions;
     schedulerOptions.mode = vptoSchedulerMode == VPTOSchedulerCLIMode::Analyze

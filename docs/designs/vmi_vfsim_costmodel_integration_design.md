@@ -18,28 +18,31 @@ ABCABC 和 AABBCC 两种 loop unroll 形式的寻优。
 
 ### 2.1 编译链路
 
-VfSim 接在 VMI lowering 完成后的公共 VPTO emission pipeline 中。建议链路为：
+VfSim 接在 VMI lowering 完成后的公共 VPTO emission pipeline 中。实际链路为：
 
 ```text
 VMIToVPTO
   -> VPTO emission preparation passes
   -> VPTOSoftPostUpdate（可选）
-  -> LoopInvariantCodeMotion
-  -> PTONarrowVPTOLoopCounters
-  -> Canonicalizer
-  -> CSE
+  -> VPTOGuardedLICM + LoopInvariantCodeMotion
+  -> Canonicalizer + CSE
   -> VPTOCombineReductions
   -> CSE
   -> VfSimUnrollPlanner          （可选，VfSim 评估两类 unroll）
-  -> ApplyLoopUnroll             （可选，PTOAS 按计划修改 IR）
-  -> Canonicalizer
-  -> CSE
+  -> PTOUnrollLoops              （可选，消费 pto.vfsim.unroll_factor）
+  -> SCCP + Canonicalizer + CSE
+  -> PTONarrowVPTOLoopCounters
   -> PTOValidateVPTOEmissionIR
   -> VPTO LLVM lowering
 ```
 
 具体接入点是 `VPTOCombineReductions` 后的第二个 `CSE` 与
 `PTOValidateVPTOEmissionIR` 之间。
+
+`PTONarrowVPTOLoopCounters` 必须排在 unroll 消费之后：该 pass 会把 index
+induction variable 重写为 i16，而 native `loopUnrollByFactor` 要求 index IV。
+VfSim 关闭时 planner/unroll 块整体跳过，narrowing 仍然保留，普通 VPTO 构建不受
+影响。
 
 现有 `VPTOScheduler` 不属于本设计的开发范围，不移动、不删除。开发和验证本阶段
 VfSim unroll 链路时保持该 pass 关闭。
@@ -466,9 +469,12 @@ scf.for %i = %c0 to %c128 step %c1
 两类候选必须分别按真实语义构造。loop-carried value 必须按 unroll lane 拆分，避免错误
 复用同一虚拟寄存器而人为拉长依赖链；需要归并时，归并指令也必须进入 VfSimProgram。
 
-当前 `PTOUnrollLoops` 只读取手写 hint `pto.unroll_factor`，不消费
-`pto.vfsim.unroll_factor`。VfSim 不在 planner 调用过程中直接执行结构性 rewrite；
-后续 costmodel-aware 的应用阶段可单独读取专用属性，避免与手写策略混淆。
+`PTOUnrollLoops` 同时读取手写 hint `pto.unroll_factor` 与 VfSim 写入的
+`pto.vfsim.unroll_factor`，两者走独立的校验路径但共享同一 native
+`loopUnrollByFactor` 实现。VfSim 不在 planner 调用过程中直接执行结构性 rewrite；
+消费发生在 planner 之后的 `PTOUnrollLoops` 第二次运行中（管线前端的第一次运行只
+消费用户 hint），通过专用属性区分来源，避免与手写策略混淆。两类属性同时出现在
+一个循环上是硬错误，与用户侧 `pto.unroll` / `pto.unroll_factor` 互斥契约一致。
 
 ## 7. Pass 职责
 
@@ -476,7 +482,7 @@ scf.for %i = %c0 to %c128 step %c1
 |---|---|---|
 | `VPTOCombineReductions` | PTOAS | 固定 reduction 的最终 VPTO op 组合 |
 | `VfSimUnrollPlanner` | PTOAS + VfSim | 枚举 ABCABC/AABBCC 候选、构造 `VfInfo`、写入 `pto.vfsim.unroll_factor` 并清理内部选择属性 |
-| 后端 loop-unroll 阶段 | PTOAS | 区分手写 hint 与 costmodel 结果，并按后端策略执行 loop rewrite |
+| `PTOUnrollLoops`（planner 后的运行） | PTOAS | 消费 `pto.vfsim.unroll_factor` 并执行 loop rewrite；与手写 hint 路径共享 native `loopUnrollByFactor` 实现 |
 | `PTOValidateVPTOEmissionIR` | PTOAS | 检查进入 LLVM emitter 前的 IR 合法性 |
 
 规划与应用分离后，cost model 可独立迭代，PTOAS 仍掌握所有结构性 IR 变换和合法性。
@@ -498,7 +504,7 @@ VfSim 的编译可用性、运行时调用和链路选择分别由以下选项�
 |---:|---:|---|
 | 关 | 任意 | 不调用 VfSim |
 | 开 | 关 | 调用 legacy TileOp planner |
-| 开 | 开 | 调用 VMI low-level unroll planner 和 apply pass |
+| 开 | 开 | 调用 VMI low-level unroll planner；随后的 `PTOUnrollLoops` 运行消费选出的 factor |
 
 本阶段开发和验证默认关闭现有 `VPTOScheduler`。该 pass 的实现和控制逻辑保持不变。
 
@@ -536,7 +542,7 @@ skip reason
 10. 识别完整生命周期、loop-carried value 和 loop live-out value。
 11. 分别构造 ABCABC/AABBCC 候选，包括 lane-local value 和必要的循环后归并。
 12. 扫描 `1..min(8, trip_count)`；非整除 factor 同时建模主体和 tail，选择全局最优模式和 factor，只写回专用 costmodel attr。
-13. 后续由 costmodel-aware 的后端阶段消费专用 attr，端到端对齐 VfSim 与 camodel 趋势。
+13. 由 planner 后的 `PTOUnrollLoops` 运行消费专用 attr，端到端对齐 VfSim 与 camodel 趋势。
 
-本阶段验收以 planner 链路为准：能够识别目标 loop、输出候选预测时间并写回专用
-unroll attr；实际消费与结构性 loop rewrite 由后续后端阶段完成。
+本阶段验收：能够识别目标 loop、输出候选预测时间并写回专用 unroll attr，且随后的
+`PTOUnrollLoops` 运行按选中 factor 完成结构性 loop rewrite。

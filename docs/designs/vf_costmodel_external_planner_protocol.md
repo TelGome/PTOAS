@@ -78,6 +78,7 @@ InsertTemplateAttributes
   -> PTOUnrollAfterLoopFusion
        - 启用 --enable-unroll-after-loop-fusion 时消费 row/col unroll attrs
        - 不区分 costmodel 内部的 ABCABC/AABBCC 模式，统一按 ABCABC 展开
+       - 只要求常量 trip count；非整除 factor 生成 epilogue loop
        - 成功消费后将对应 factor 复位为 1
   -> FlattenFusionRegion
   -> VPTOScheduler
@@ -192,8 +193,12 @@ storage shape 和逐行地址 stride 仍使用 physical `rows/cols`；动态 val
 instruction/value definition 构造，因此两种候选使用相同依赖图，只改变展开后的
 指令顺序。
 
-合法 factor 满足 `1 <= factor <= 8` 且能整除搜索 trip count。baseline 失败时
-跳过整个 group；单个 ABCABC/AABBCC 候选失败时仅 warning 并继续评估其他候选。
+合法 factor 满足 `1 <= factor <= 8` 且能整除搜索 trip count（本 legacy tile fusion
+路径的候选枚举规则；VMI low-level 路径不要求整除，见
+`vmi_vfsim_costmodel_integration_design.md`）。消费端 `PTOUnrollAfterLoopFusion`
+已支持非整除 factor（生成 epilogue loop），但 legacy planner 不会产出这类候选。
+baseline 失败时跳过整个 group；单个 ABCABC/AABBCC 候选失败时仅 warning 并继续
+评估其他候选。
 
 ## 输出 IR
 
@@ -271,7 +276,8 @@ pto.fusion.col_unroll_factor
 
 - 无论 VfSim 内部选择的是 ABCABC 还是 AABBCC，后端都按 ABCABC 形式展开。
 - 只展开当前最内层 `scf.for`。
-- 只处理常量 trip count，且 trip count 必须能被 factor 整除。
+- 只处理常量 trip count；trip count 不需要被 factor 整除，非整除时由
+  `loopUnrollByFactor` 生成 epilogue loop 并穿线 live-out carry values。
 - 当前约定下，col loop 存在时消费 `col_unroll_factor`；col loop 已被折叠后，
   row loop 成为最内层时消费 `row_unroll_factor`。
 - 成功消费某个 factor 后，将该 region 上对应 attr 复位为 `1`，避免同一 factor
@@ -322,11 +328,13 @@ VfSim native planner 位于 `3rdparty/VfSimulator/native`。
 | `TileOpTemplates.h/cpp` | 将 PTOAS tileop group lower 成 VfSim `VfInfo` micro-op program。 |
 | `ParamDB.h/cpp` | 加载 ISA/uarch/forwarding/initiation-interval 参数。 |
 
-候选枚举规则：
+候选枚举规则（legacy tile fusion 路径）：
 
 - 搜索范围是 `1..maxUnroll`。
 - 当前默认 `maxUnroll = 8`。
-- 只考虑能够整除目标 loop trip count 的 factor。
+- 只考虑能够整除目标 loop trip count 的 factor（VMI low-level 路径枚举全部
+  `2..min(maxUnroll, trip_count)` 因子并建模 tail loop，见
+  `vmi_vfsim_costmodel_integration_design.md`）。
 - factor 为 `1` 时只预测一次 `NO_UNROLL` baseline。
 - factor 大于 `1` 时分别构造并预测 `ABCABC(factor)` 和 `AABBCC(factor)`。
 - 在 baseline、全部 ABCABC 和全部 AABBCC 候选中选择预测 cycle 最低的候选。
