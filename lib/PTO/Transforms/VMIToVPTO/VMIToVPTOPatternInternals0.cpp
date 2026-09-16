@@ -710,6 +710,121 @@ FailureOr<Value> createIotaContiguousChunk(
       .create<VciOp>(context.loc, resultType, *chunkBase, context.orderAttr)
       .getResult();
 }
+/// Float lane-strided ramp: vci(0) × (±1/laneStride) + base  [3 instructions]
+/// DESC uses a negative scale so a single vadds suffices (saves vdup+vsub).
+Value createIotaLaneStrideFloatRamp(Location loc, Type resultType, Value indices,
+                                    Value chunkBase, FloatType floatType,
+                                    int64_t laneStride, StringRef order,
+                                    Value mask, PatternRewriter &rewriter) {
+  double scale = (order == "DESC") ? -1.0 / laneStride : 1.0 / laneStride;
+  Value factor =
+      rewriter
+          .create<arith::ConstantOp>(loc, rewriter.getFloatAttr(floatType, scale))
+          .getResult();
+  Value ramp =
+      rewriter.create<VmulsOp>(loc, resultType, indices, factor, mask).getResult();
+  return rewriter.create<VaddsOp>(loc, resultType, ramp, chunkBase, mask)
+      .getResult();
+}
+
+/// Integer lane-strided ramp: vci(0) >> log2(laneStride) [+ vneg] + base
+/// ASC: 3 instructions; DESC: 4 instructions (extra vneg).
+Value createIotaLaneStrideIntRamp(Location loc, Type resultType, Value indices,
+                                  Value chunkBase, int64_t laneStride,
+                                  StringRef order, Value mask,
+                                  PatternRewriter &rewriter) {
+  int64_t shift = static_cast<int64_t>(llvm::Log2_64(static_cast<uint64_t>(laneStride)));
+  Type i16Type = rewriter.getIntegerType(16);
+  Value shiftConst =
+      rewriter.create<arith::ConstantOp>(loc, rewriter.getIntegerAttr(i16Type, shift))
+          .getResult();
+
+  // vshrs is arithmetic (sign-extending) for signed/signless integer types.
+  // vci(0) produces lane indices [0, VL-1]; for narrow types (e.g. i8 with
+  // VL=256) indices ≥ 128 wrap to negative in the signed representation,
+  // making arithmetic right shift fill sampled lanes with wrong values.
+  // Reinterpret as unsigned so vshrs performs a logical (zero-filling) shift.
+  auto vregType = cast<VRegType>(resultType);
+  auto intElemType = cast<IntegerType>(vregType.getElementType());
+  Type unsignedVregType = resultType;
+  bool needsCast = !intElemType.isUnsigned();
+  if (needsCast) {
+    Type unsignedElem = IntegerType::get(rewriter.getContext(),
+                                         intElemType.getWidth(),
+                                         IntegerType::Unsigned);
+    unsignedVregType =
+        VRegType::get(rewriter.getContext(), vregType.getElementCount(),
+                      unsignedElem);
+  }
+  Value shiftInput = needsCast
+      ? rewriter.create<VbitcastOp>(loc, unsignedVregType, indices).getResult()
+      : indices;
+  Value shiftedUnsigned =
+      rewriter.create<VshrsOp>(loc, unsignedVregType, shiftInput, shiftConst, mask)
+          .getResult();
+  Value shifted = needsCast
+      ? rewriter.create<VbitcastOp>(loc, resultType, shiftedUnsigned).getResult()
+      : shiftedUnsigned;
+
+  if (order == "DESC") {
+    // DESC: base − shifted = base + (−shifted)
+    Value negShifted =
+        rewriter.create<VnegOp>(loc, resultType, shifted, mask).getResult();
+    return rewriter.create<VaddsOp>(loc, resultType, negShifted, chunkBase, mask)
+        .getResult();
+  }
+  return rewriter.create<VaddsOp>(loc, resultType, shifted, chunkBase, mask)
+      .getResult();
+}
+
+/// Materialize a logical contiguous iota in a lane-strided physical chunk.
+/// Physical lane i*laneStride observes value base+i (ASC) or base-i (DESC).
+/// Supports laneStride ∈ {2,4} for f16/bf16/f32 and i8/i16/i32.
+///
+/// CONTRACT – odd/non-sampled lanes contain undefined fill:
+///   Float vmuls rounds (base + i + 0.5) in odd lanes for laneStride=2; these
+///   physical lanes must not be consumed.  The only valid consumers are ops
+///   that sample every laneStride-th lane (e.g. PK_B32 stores), as guaranteed
+///   by the lane-strided layout contract.  Any pass (e.g. vmi-layout-fold)
+///   that would make these lanes visible to a contiguous consumer would
+///   silently introduce wrong values and must be guarded with an assertion.
+FailureOr<Value> createIotaLaneStrideChunk(
+    const IotaMaterializationContext &context, Type resultType,
+    int64_t laneStride, int64_t laneOffset) {
+  auto vregType = dyn_cast<VRegType>(resultType);
+  Type elemType = context.base.getType();
+  auto floatType = dyn_cast<FloatType>(elemType);
+  auto intType = dyn_cast<IntegerType>(elemType);
+  if (!vregType || (!floatType && !intType) ||
+      (laneStride != 2 && laneStride != 4)) {
+    return failure();
+  }
+  FailureOr<Value> mask =
+      createAllTrueMaskForVReg(context.loc, vregType, context.rewriter);
+  FailureOr<Value> zero =
+      createScalarOffsetConstant(context.loc, elemType, 0, context.rewriter);
+  if (failed(mask) || failed(zero)) {
+    return failure();
+  }
+  StringRef order = getIotaOrder(context);
+  Value indices = context.rewriter
+                      .create<VciOp>(context.loc, resultType, *zero, StringAttr{})
+                      .getResult();
+  FailureOr<Value> chunkBase = createIotaChunkBase(
+      context.loc, context.base, laneOffset, order, context.rewriter);
+  if (failed(chunkBase)) {
+    return failure();
+  }
+  if (floatType) {
+    return createIotaLaneStrideFloatRamp(context.loc, resultType, indices,
+                                         *chunkBase, floatType, laneStride,
+                                         order, *mask, context.rewriter);
+  }
+  return createIotaLaneStrideIntRamp(context.loc, resultType, indices,
+                                     *chunkBase, laneStride, order, *mask,
+                                     context.rewriter);
+}
+
 FailureOr<std::optional<Value>> createPowerOfTwoSubVLChunk(
     Location loc, Type resultType, Value base, int64_t groupSize,
     StringRef order, Value allMask, PatternRewriter &rewriter) {
@@ -1075,19 +1190,39 @@ private:
     return success();
   }
   LogicalResult lowerContiguousIota(
-      IotaOp op, Value base, TypeRange resultTypes, int64_t lanesPerPart,
-      OneToNPatternRewriter &rewriter, SmallVectorImpl<Value> &results) const {
+      IotaOp op, Value base, VMILayoutAttr layout, TypeRange resultTypes,
+      int64_t lanesPerPart, OneToNPatternRewriter &rewriter,
+      SmallVectorImpl<Value> &results) const {
     IotaMaterializationContext context{op.getLoc(), base, op.getOrderAttr(),
                                        rewriter};
+    int64_t laneStride = layout.getLaneStride();
+    if (laneStride != 1 && laneStride != 2 && laneStride != 4) {
+      return rewriter.notifyMatchFailure(
+          op, "unsupported contiguous iota lane_stride");
+    }
+    if (lanesPerPart % laneStride != 0) {
+      return rewriter.notifyMatchFailure(
+          op, "contiguous iota lane_stride does not divide physical lanes");
+    }
+    int64_t logicalLanesPerChunk = lanesPerPart / laneStride;
     for (auto [index, resultType] : llvm::enumerate(resultTypes)) {
       if (!isa<VRegType>(resultType)) {
         return rewriter.notifyMatchFailure(op, "iota result must be vreg");
       }
-      FailureOr<Value> result = createIotaContiguousChunk(
-          context, resultType, static_cast<int64_t>(index) * lanesPerPart);
+      int64_t laneOffset = static_cast<int64_t>(index) *
+                           logicalLanesPerChunk;
+      FailureOr<Value> result = laneStride == 1
+                                    ? createIotaContiguousChunk(
+                                          context, resultType, laneOffset)
+                                    : createIotaLaneStrideChunk(
+                                          context, resultType, laneStride,
+                                          laneOffset);
       if (failed(result)) {
-        return rewriter.notifyMatchFailure(
-            op, "failed to materialize contiguous iota chunk");
+        // Hard error: no other pattern covers this combination; a soft
+        // notifyMatchFailure would surface as a generic legalization failure.
+        return op.emitError(
+            "lane-strided iota: unsupported element type or lane_stride "
+            "(supported: f16/bf16/f32/i8/i16/i32, lane_stride ∈ {2,4})");
       }
       results.push_back(*result);
     }
@@ -1133,8 +1268,8 @@ private:
         return failure();
       }
     } else if (layout.isContiguous()) {
-      if (failed(lowerContiguousIota(op, base, resultTypes, lanesPerPart,
-                                     rewriter, results))) {
+      if (failed(lowerContiguousIota(op, base, layout, resultTypes,
+                                     lanesPerPart, rewriter, results))) {
         return failure();
       }
     } else if (failed(lowerDeinterleavedIota(
