@@ -6,19 +6,23 @@
 // INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
 // See LICENSE in the root of the software repository for the full text of the License.
 
-// Regression for #1411 – float lane-strided iota lowering path.
+// Regression for #1411 – bf16 lane-strided iota lowering path.
 //
 // VL=64 bf16: the preferred store layout pattern for 16-bit VL=64 is lane_stride=2
 // (kDenseStoreLayoutPatterns: {bits<16>(), ls(2), N<64>(), preferred=true}).
 // VMILayoutAssignment propagates this backward through vadds to the vci.
 //
-// Lowering path exercised (createIotaLaneStrideFloatRamp):
-//   vci(0.0, ls=2) → physical [0.0..127.0] as bf16
-//   vmuls(×0.5) → physical [0.0..63.5], even lanes = logical [0.0..63.0]
-//   vadds(+0.0) → [0.0..63.5], vsts(PK_B32) selects even lanes → [0.0..63.0].
+// Lowering path exercised (createIotaLaneStrideBF16Ramp) — bf16 cannot use
+// the float ramp: vmuls.v128bf16 crashes the bisheng backend and a bare
+// vci.v128bf16 yields S8-dtype byte indices in the simulator.  The ramp is
+// built on an i16 register and converted numerically:
+//   vci(0, i16) → [0..127]
+//   vshrs(>>1)  → lane 2k = k, odd lanes hold fill
+//   vcvt s16→f16 → vcvt f16→bf16 → numeric [0..63] as bf16
+//   vadds(+0.0) → vsts(PK_B32) selects even lanes → [0.0..63.0].
 //
 // The kernel uses a bare vci→vstore so no user-supplied pred mask is involved;
-// the float ramp is exercised entirely inside the iota lowering pattern.
+// the ramp is exercised entirely inside the iota lowering pattern.
 //
 // Expected output: 64 bf16 elements [0.0..63.0].
 

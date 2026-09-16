@@ -724,8 +724,45 @@ public:
         continue;
       }
       auto maskType = MaskType::get(rewriter.getContext(), maskGranularity);
-      FailureOr<Value> mask = createPrefixMaskForActiveLanes(
-          op.getLoc(), maskType, *activeLanes, rewriter);
+      // The mask granularity may be finer than one output element.
+      // For example, PK_B64 stores f32 pairs (64-bit output) but the b32 mask
+      // has one bit per 32-bit f32 input, so each output pair consumes 2 mask
+      // bits.  Compute how many mask bits one output element occupies and scale
+      // activeLanes accordingly so the mask covers all physical input lanes
+      // that participate in the pack, not just the even "data" lanes.
+      FailureOr<int64_t> maskLanesPerPart =
+          getMaskLanesPerPart(maskGranularity);
+      if (failed(maskLanesPerPart)) {
+        return rewriter.notifyMatchFailure(
+            op, "failed to query mask lanes per part for lane_stride store");
+      }
+      int64_t maskGranBits =
+          static_cast<int64_t>(mlir::pto::kValue256 * mlir::pto::kValue8) /
+          *maskLanesPerPart;
+      unsigned elementBits =
+          pto::getPTOStorageElemBitWidth(valueVMIType.getElementType());
+      int64_t laneStride =
+          valueVMIType.getLayoutAttr().getLaneStride();
+      // outputPairBits = size (in bits) of one packed output element
+      int64_t outputPairBits =
+          static_cast<int64_t>(elementBits) * laneStride;
+      // maskBitsPerOutput = how many mask bits one output element consumes
+      int64_t maskBitsPerOutput = outputPairBits / maskGranBits;
+      int64_t physActiveMaskLanes =
+          std::min(*activeLanes * maskBitsPerOutput, *maskLanesPerPart);
+      // Use getPrefixPattern (not getStaticPrefixPattern) so that when
+      // physActiveMaskLanes covers the entire mask we emit PAT_ALL (i32 0)
+      // rather than PAT_VL64 (i32 8).  Some hardware instructions (e.g.
+      // vstsx1.v128bf16) require PAT_ALL for a full-mask predicate and reject
+      // the semantically-equivalent PAT_VL64.
+      std::optional<std::string> maskPattern =
+          getPrefixPattern(physActiveMaskLanes, *maskLanesPerPart);
+      if (!maskPattern) {
+        return rewriter.notifyMatchFailure(
+            op, "failed to determine mask pattern for lane_stride store");
+      }
+      FailureOr<Value> mask =
+          createPrefixMask(op.getLoc(), maskType, *maskPattern, rewriter);
       if (failed(mask)) {
         return rewriter.notifyMatchFailure(
             op, "failed to create lane_stride store mask");

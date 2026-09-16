@@ -727,6 +727,76 @@ Value createIotaLaneStrideFloatRamp(Location loc, Type resultType, Value indices
       .getResult();
 }
 
+/// bf16 lane-strided ramp: vci(0,i16) >> log2(laneStride) [+ vneg], then a
+/// numeric vcvt s16→f16→bf16 chain, then vadds + base.
+/// ASC: 5 instructions; DESC: 6 instructions (extra vneg).
+/// See createIotaLaneStrideChunk for why bf16 cannot use the float ramp.
+FailureOr<Value> createIotaLaneStrideBF16Ramp(Location loc, Type resultType,
+                                              Value chunkBase,
+                                              int64_t laneStride,
+                                              StringRef order, Value mask,
+                                              PatternRewriter &rewriter) {
+  auto vregType = dyn_cast<VRegType>(resultType);
+  if (!vregType || (laneStride != 2 && laneStride != 4)) {
+    return failure();
+  }
+  MLIRContext *context = rewriter.getContext();
+  Type i16Type = rewriter.getIntegerType(16);
+  auto i16VRegType =
+      VRegType::get(context, vregType.getElementCount(), i16Type);
+  auto f16VRegType =
+      VRegType::get(context, vregType.getElementCount(),
+                    rewriter.getF16Type());
+
+  Value zeroI16 =
+      rewriter.create<arith::ConstantOp>(loc, rewriter.getI16IntegerAttr(0));
+  Value indices =
+      rewriter.create<VciOp>(loc, i16VRegType, zeroI16, StringAttr{})
+          .getResult();
+
+  int64_t shift =
+      static_cast<int64_t>(llvm::Log2_64(static_cast<uint64_t>(laneStride)));
+  Value shiftConst = rewriter.create<arith::ConstantOp>(
+      loc, rewriter.getI16IntegerAttr(static_cast<int64_t>(shift)));
+  // vshrs on a signless i16 register must view the lanes as unsigned so the
+  // shift zero-fills (same reasoning as createIotaLaneStrideIntRamp).
+  Type u16Type = IntegerType::get(context, 16, IntegerType::Unsigned);
+  auto u16VRegType =
+      VRegType::get(context, vregType.getElementCount(), u16Type);
+  Value shiftInput =
+      rewriter.create<VbitcastOp>(loc, u16VRegType, indices).getResult();
+  Value shiftedUnsigned = rewriter
+                              .create<VshrsOp>(loc, u16VRegType, shiftInput,
+                                               shiftConst, mask)
+                              .getResult();
+  Value shifted =
+      rewriter.create<VbitcastOp>(loc, i16VRegType, shiftedUnsigned)
+          .getResult();
+
+  if (order == "DESC") {
+    Value negShifted =
+        rewriter.create<VnegOp>(loc, i16VRegType, shifted, mask).getResult();
+    shifted = negShifted;
+  }
+
+  // Both vcvt contracts require an explicit round mode.  The lane values are
+  // small integers exactly representable in f16 and bf16, so the mode is
+  // immaterial; use round-to-nearest-even.
+  StringAttr rnd = rewriter.getStringAttr("R");
+  Value asF16 = rewriter
+                    .create<VcvtOp>(loc, f16VRegType, shifted, mask,
+                                    rnd, /*sat=*/nullptr,
+                                    /*part=*/nullptr)
+                    .getResult();
+  Value asBF16 = rewriter
+                     .create<VcvtOp>(loc, resultType, asF16, mask,
+                                     rnd, /*sat=*/nullptr,
+                                     /*part=*/nullptr)
+                     .getResult();
+  return rewriter.create<VaddsOp>(loc, resultType, asBF16, chunkBase, mask)
+      .getResult();
+}
+
 /// Integer lane-strided ramp: vci(0) >> log2(laneStride) [+ vneg] + base
 /// ASC: 3 instructions; DESC: 4 instructions (extra vneg).
 Value createIotaLaneStrideIntRamp(Location loc, Type resultType, Value indices,
@@ -807,6 +877,22 @@ FailureOr<Value> createIotaLaneStrideChunk(
     return failure();
   }
   StringRef order = getIotaOrder(context);
+  // bf16 iota: the float ramp (vmuls ×1/laneStride) crashes the bisheng
+  // backend with "Copy one register into another with a different width", and
+  // a bare vci.v128bf16 produces S8-dtype byte indices in the simulator.
+  // Build the ramp on an i16 register instead (vci → vshrs) and convert to
+  // bf16 numerically with vcvt s16→f16→bf16.  bf16 integers in [0, 2^15) are
+  // exactly representable through this chain.
+  if (floatType && isa<BFloat16Type>(floatType)) {
+    FailureOr<Value> chunkBase = createIotaChunkBase(
+        context.loc, context.base, laneOffset, order, context.rewriter);
+    if (failed(chunkBase)) {
+      return failure();
+    }
+    return createIotaLaneStrideBF16Ramp(context.loc, resultType, *chunkBase,
+                                        laneStride, order, *mask,
+                                        context.rewriter);
+  }
   Value indices = context.rewriter
                       .create<VciOp>(context.loc, resultType, *zero, StringAttr{})
                       .getResult();

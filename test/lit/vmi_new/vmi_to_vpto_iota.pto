@@ -225,15 +225,25 @@ module {
 // CHECK-NOT: pto.vsub
 // CHECK-NOT: pto.vmi.
 
+// bf16 lane_stride=2: the float ramp (vmuls ×0.5) is not usable for bf16 —
+// vmuls.v128bf16 crashes the bisheng backend, and vci.v128bf16 produces
+// S8-dtype byte indices in the simulator.  Build the ramp on an i16 register
+// (vci → vbitcast → vshrs) and convert numerically to bf16 with
+// vcvt s16→f16 → f16→bf16, then add the base.
 // CHECK-LABEL: func.func @vmi_to_vpto_iota_bf16_lane_stride2(
-// CHECK: %[[C2BF:.*]] = arith.constant 5.000000e-01 : bf16
-// CHECK: %[[C0BF:.*]] = arith.constant 0.000000e+00 : bf16
-// CHECK: %[[IDX_BF:.*]] = pto.vci %[[C0BF]] : bf16 -> !pto.vreg<128xbf16>
-// CHECK: %[[SCALED_BF:.*]] = pto.vmuls %[[IDX_BF]], %[[C2BF]]
-// CHECK: %[[RESULT_BF:.*]] = pto.vadds %[[SCALED_BF]], %arg0
+// CHECK: arith.constant 1 : i16
+// CHECK: arith.constant 0 : i16
+// CHECK: %[[IDX_BF:.*]] = pto.vci {{.*}} : i16 -> !pto.vreg<128xi16>
+// CHECK: %[[IDX_U:.*]] = pto.vbitcast %[[IDX_BF]] : !pto.vreg<128xi16> -> !pto.vreg<128xui16>
+// CHECK: %[[SHR:.*]] = pto.vshrs %[[IDX_U]]
+// CHECK: %[[SHR_I:.*]] = pto.vbitcast %[[SHR]] : !pto.vreg<128xui16> -> !pto.vreg<128xi16>
+// CHECK: %[[AS_F16:.*]] = pto.vcvt %[[SHR_I]]{{.*}} : !pto.vreg<128xi16>, !pto.mask<b16> -> !pto.vreg<128xf16>
+// CHECK: %[[AS_BF:.*]] = pto.vcvt %[[AS_F16]]{{.*}} : !pto.vreg<128xf16>, !pto.mask<b16> -> !pto.vreg<128xbf16>
+// CHECK: %[[RESULT_BF:.*]] = pto.vadds %[[AS_BF]], %arg0
 // CHECK: return %[[RESULT_BF]]
 // CHECK-NOT: pto.vdup
 // CHECK-NOT: pto.vsub
+// CHECK-NOT: pto.vmuls
 // CHECK-NOT: pto.vmi.
 
 // CHECK-LABEL: func.func @vmi_to_vpto_iota_f16_deint2_asc(
