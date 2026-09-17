@@ -731,6 +731,39 @@ Value createIotaLaneStrideFloatRamp(Location loc, Type resultType, Value indices
 /// numeric vcvt s16→f16→bf16 chain, then vadds + base.
 /// ASC: 5 instructions; DESC: 6 instructions (extra vneg).
 /// See createIotaLaneStrideChunk for why bf16 cannot use the float ramp.
+FailureOr<Value> createIotaLaneStrideBF16Indices(
+    Location loc, VRegType i16VRegType, int64_t laneStride, StringRef order,
+    Value mask, PatternRewriter &rewriter) {
+  MLIRContext *context = rewriter.getContext();
+  Value zeroI16 =
+      rewriter.create<arith::ConstantOp>(loc, rewriter.getI16IntegerAttr(0));
+  Value indices =
+      rewriter.create<VciOp>(loc, i16VRegType, zeroI16, StringAttr{})
+          .getResult();
+  int64_t shift =
+      static_cast<int64_t>(llvm::Log2_64(static_cast<uint64_t>(laneStride)));
+  Value shiftConst = rewriter.create<arith::ConstantOp>(
+      loc, rewriter.getI16IntegerAttr(static_cast<int64_t>(shift)));
+  // vshrs must view lanes as unsigned so the shift zero-fills.
+  Type u16Type = IntegerType::get(context, 16, IntegerType::Unsigned);
+  auto u16VRegType =
+      VRegType::get(context, i16VRegType.getElementCount(), u16Type);
+  Value shiftInput =
+      rewriter.create<VbitcastOp>(loc, u16VRegType, indices).getResult();
+  Value shiftedUnsigned = rewriter
+                              .create<VshrsOp>(loc, u16VRegType, shiftInput,
+                                               shiftConst, mask)
+                              .getResult();
+  Value shifted = rewriter
+                      .create<VbitcastOp>(loc, i16VRegType, shiftedUnsigned)
+                      .getResult();
+  if (order == "DESC") {
+    shifted =
+        rewriter.create<VnegOp>(loc, i16VRegType, shifted, mask).getResult();
+  }
+  return shifted;
+}
+
 FailureOr<Value> createIotaLaneStrideBF16Ramp(Location loc, Type resultType,
                                               Value chunkBase,
                                               int64_t laneStride,
@@ -748,35 +781,10 @@ FailureOr<Value> createIotaLaneStrideBF16Ramp(Location loc, Type resultType,
       VRegType::get(context, vregType.getElementCount(),
                     rewriter.getF16Type());
 
-  Value zeroI16 =
-      rewriter.create<arith::ConstantOp>(loc, rewriter.getI16IntegerAttr(0));
-  Value indices =
-      rewriter.create<VciOp>(loc, i16VRegType, zeroI16, StringAttr{})
-          .getResult();
-
-  int64_t shift =
-      static_cast<int64_t>(llvm::Log2_64(static_cast<uint64_t>(laneStride)));
-  Value shiftConst = rewriter.create<arith::ConstantOp>(
-      loc, rewriter.getI16IntegerAttr(static_cast<int64_t>(shift)));
-  // vshrs on a signless i16 register must view the lanes as unsigned so the
-  // shift zero-fills (same reasoning as createIotaLaneStrideIntRamp).
-  Type u16Type = IntegerType::get(context, 16, IntegerType::Unsigned);
-  auto u16VRegType =
-      VRegType::get(context, vregType.getElementCount(), u16Type);
-  Value shiftInput =
-      rewriter.create<VbitcastOp>(loc, u16VRegType, indices).getResult();
-  Value shiftedUnsigned = rewriter
-                              .create<VshrsOp>(loc, u16VRegType, shiftInput,
-                                               shiftConst, mask)
-                              .getResult();
-  Value shifted =
-      rewriter.create<VbitcastOp>(loc, i16VRegType, shiftedUnsigned)
-          .getResult();
-
-  if (order == "DESC") {
-    Value negShifted =
-        rewriter.create<VnegOp>(loc, i16VRegType, shifted, mask).getResult();
-    shifted = negShifted;
+  FailureOr<Value> shifted = createIotaLaneStrideBF16Indices(
+      loc, i16VRegType, laneStride, order, mask, rewriter);
+  if (failed(shifted)) {
+    return failure();
   }
 
   // Both vcvt contracts require an explicit round mode.  The lane values are
@@ -784,7 +792,7 @@ FailureOr<Value> createIotaLaneStrideBF16Ramp(Location loc, Type resultType,
   // immaterial; use round-to-nearest-even.
   StringAttr rnd = rewriter.getStringAttr("R");
   Value asF16 = rewriter
-                    .create<VcvtOp>(loc, f16VRegType, shifted, mask,
+                    .create<VcvtOp>(loc, f16VRegType, *shifted, mask,
                                     rnd, /*sat=*/nullptr,
                                     /*part=*/nullptr)
                     .getResult();

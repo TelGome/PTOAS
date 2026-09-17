@@ -1797,4 +1797,3 @@ DESC uses `vneg` to negate the shifted ramp before adding `base`, equivalent to
 computing `base − ⌊i/LS⌋` without a scalar-minus-vector instruction.  The extra
 instruction (4 vs 3 for float DESC) is acceptable because integer DESC
 lane-strided iota is expected to be rare in practice.
-
