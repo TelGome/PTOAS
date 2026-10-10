@@ -544,6 +544,20 @@ FailureOr<VecMemoryAccessDescriptor>
 vecscopemembar::buildAccessDescriptor(Operation *op, ArrayRef<Value> ivs) {
   VecMemoryAccessDescriptor desc;
 
+  if (auto load = dyn_cast<pto::PTOLoadOp>(op)) {
+    desc.kind = VecScopeAccessKind::Load;
+    desc.unit = VecScopeAccessUnit::Scalar;
+    fillContiguous(desc, load.getPtr(), load.getOffset(),
+                   elementByteSize(load.getPtr().getType()), uint64_t(1), ivs);
+    return desc;
+  }
+  if (auto store = dyn_cast<pto::PTOStoreOp>(op)) {
+    desc.kind = VecScopeAccessKind::Store;
+    desc.unit = VecScopeAccessUnit::Scalar;
+    fillContiguous(desc, store.getPtr(), store.getOffset(),
+                   elementByteSize(store.getPtr().getType()), uint64_t(1), ivs);
+    return desc;
+  }
   if (auto uvld = dyn_cast<pto::UvldOp>(op)) {
     desc.kind = VecScopeAccessKind::Load;
     fillContiguous(desc, uvld.getSource(), uvld.getOffset(),

@@ -56,6 +56,7 @@ struct AccessOccurrence {
   unsigned id = 0;
   Operation *op = nullptr;
   VecScopeAccessKind kind = VecScopeAccessKind::Load;
+  VecScopeAccessUnit unit = VecScopeAccessUnit::Vector;
   VecScopeMemoryFootprint footprint;
   SmallVector<unsigned, 2> loopNest;
   SmallVector<unsigned, 2> schedulePath;
@@ -64,6 +65,7 @@ struct AccessOccurrence {
 
 struct VecMemoryAccessDescriptor {
   VecScopeAccessKind kind = VecScopeAccessKind::Load;
+  VecScopeAccessUnit unit = VecScopeAccessUnit::Vector;
   Value base;
   std::optional<AddressSpace> addressSpace;
   AffineByteExpr byteOffset;

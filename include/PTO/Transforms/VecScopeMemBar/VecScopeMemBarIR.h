@@ -26,6 +26,8 @@ enum class VecScopeNodeKind {
   ExistingBarrier,
 };
 
+enum class VecScopeAccessUnit { Vector, Scalar };
+
 struct VecScopeLoopInfo {
   unsigned id = 0;
   scf::ForOp op;
@@ -51,6 +53,14 @@ bool isUBVectorStore(Operation *op);
 bool isUBVectorLoad(Operation *op);
 
 bool isUBVectorMemoryOp(Operation *op);
+
+bool isUBScalarMemoryOp(Operation *op);
+
+bool isUBScalarStore(Operation *op);
+
+bool isUBScalarLoad(Operation *op);
+
+bool isUBMemoryOp(Operation *op);
 
 SmallVector<Value, 2> getStoredValues(Operation *storeOp);
 

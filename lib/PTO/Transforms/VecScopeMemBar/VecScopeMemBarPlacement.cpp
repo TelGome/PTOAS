@@ -112,6 +112,35 @@ static bool coveredByExisting(Operation *anchor, MemBarKind kind,
   return false;
 }
 
+static bool isProducerAccessForBarrier(MemBarKind kind, Operation *op) {
+  switch (kind) {
+  case MemBarKind::VLD_VST:
+  case MemBarKind::VLD_ST:
+    return isUBVectorLoad(op);
+  case MemBarKind::VST_VLD:
+  case MemBarKind::VST_VST:
+  case MemBarKind::VST_LD:
+  case MemBarKind::VST_ST:
+    return isUBVectorStore(op);
+  case MemBarKind::LD_VST:
+  case MemBarKind::LD_ST:
+    return isUBScalarLoad(op);
+  case MemBarKind::ST_VLD:
+  case MemBarKind::ST_VST:
+  case MemBarKind::ST_LD:
+  case MemBarKind::ST_ST:
+    return isUBScalarStore(op);
+  case MemBarKind::VV_ALL:
+    return isUBVectorMemoryOp(op);
+  case MemBarKind::VS_ALL:
+    return isUBVectorMemoryOp(op);
+  case MemBarKind::SV_ALL:
+  case MemBarKind::SS_ALL:
+    return isUBScalarMemoryOp(op);
+  }
+  return false;
+}
+
 //===----------------------------------------------------------------------===//
 // Transitive WAW redundancy helpers
 //
@@ -516,17 +545,13 @@ FailureOr<VecScopeMemBarPlan> vecscopemembar::solveVecScopeMemBarPlacement(
       if (!b1.anchor->isBeforeInBlock(b2.anchor))
         continue;
       bool breaksCoverage = false;
-      bool checkLoad = b1.kind == MemBarKind::VLD_VST;
-      bool checkBoth = b1.kind == MemBarKind::VV_ALL;
       for (Operation *cur = b1.anchor;
            cur && cur != b2.anchor && cur->getBlock() == block;
            cur = cur->getNextNode()) {
         cur->walk([&](Operation *o) {
           if (breaksCoverage)
             return;
-          if (checkBoth ? isUBVectorMemoryOp(o)
-                        : (checkLoad ? isUBVectorLoad(o)
-                                     : isUBVectorStore(o)))
+          if (isProducerAccessForBarrier(b1.kind, o))
             breaksCoverage = true;
         });
         if (breaksCoverage)

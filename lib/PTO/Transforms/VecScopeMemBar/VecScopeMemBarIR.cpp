@@ -19,8 +19,6 @@ using namespace mlir::pto::vecscopemembar;
 namespace {
 
 static bool hasUBEffect(Operation *op, bool wantRead, bool wantWrite) {
-  if (!isa<pto::VectorMicroOpInterface>(op))
-    return false;
   auto iface = dyn_cast<MemoryEffectOpInterface>(op);
   if (!iface)
     return false;
@@ -61,12 +59,34 @@ bool vecscopemembar::isUBVectorLoad(Operation *op) {
 }
 
 bool vecscopemembar::isUBVectorMemoryOp(Operation *op) {
-  return isUBVectorStore(op) || isUBVectorLoad(op);
+  return (!isa<pto::SimtOpInterface>(op)) &&
+         (isUBVectorStore(op) || isUBVectorLoad(op));
+}
+
+bool vecscopemembar::isUBScalarMemoryOp(Operation *op) {
+  return isa<pto::SimtOpInterface>(op) &&
+         (hasUBEffect(op, /*wantRead=*/true, /*wantWrite=*/true));
+}
+
+bool vecscopemembar::isUBScalarStore(Operation *op) {
+  return isa<pto::SimtOpInterface>(op) &&
+         hasUBEffect(op, /*wantRead=*/false, /*wantWrite=*/true);
+}
+
+bool vecscopemembar::isUBScalarLoad(Operation *op) {
+  return isa<pto::SimtOpInterface>(op) &&
+         hasUBEffect(op, /*wantRead=*/true, /*wantWrite=*/false);
+}
+
+bool vecscopemembar::isUBMemoryOp(Operation *op) {
+  return isUBVectorMemoryOp(op) || isUBScalarMemoryOp(op);
 }
 
 SmallVector<Value, 2> vecscopemembar::getStoredValues(Operation *storeOp) {
   SmallVector<Value, 2> out;
-  if (auto s = dyn_cast<pto::VstsOp>(storeOp)) {
+  if (auto s = dyn_cast<pto::PTOStoreOp>(storeOp)) {
+    out.push_back(s.getValue());
+  } else if (auto s = dyn_cast<pto::VstsOp>(storeOp)) {
     out.push_back(s.getValue());
   } else if (auto s = dyn_cast<pto::Vstsx2Op>(storeOp)) {
     out.push_back(s.getLow());
@@ -77,7 +97,9 @@ SmallVector<Value, 2> vecscopemembar::getStoredValues(Operation *storeOp) {
 
 SmallVector<Value, 2> vecscopemembar::getLoadedValues(Operation *loadOp) {
   SmallVector<Value, 2> out;
-  if (auto l = dyn_cast<pto::VldsOp>(loadOp)) {
+  if (auto l = dyn_cast<pto::PTOLoadOp>(loadOp)) {
+    out.push_back(l.getResult());
+  } else if (auto l = dyn_cast<pto::VldsOp>(loadOp)) {
     if (Value r = l.getResult())
       out.push_back(r);
   } else if (auto l = dyn_cast<pto::Vldsx2Op>(loadOp)) {

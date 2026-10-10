@@ -38,17 +38,28 @@ using mlir::presburger::IntegerPolyhedron;
 
 namespace {
 
-static std::optional<MemBarKind> hazardKind(VecScopeAccessKind producer,
-                                            VecScopeAccessKind consumer) {
-  if (producer == VecScopeAccessKind::Store &&
-      consumer == VecScopeAccessKind::Load)
-    return MemBarKind::VST_VLD; // RAW
-  if (producer == VecScopeAccessKind::Store &&
-      consumer == VecScopeAccessKind::Store)
-    return MemBarKind::VST_VST; // WAW
-  if (producer == VecScopeAccessKind::Load &&
-      consumer == VecScopeAccessKind::Store)
-    return MemBarKind::VLD_VST; // WAR
+static std::optional<MemBarKind>
+hazardKind(const AccessOccurrence &producer, const AccessOccurrence &consumer) {
+  bool producerVector = producer.unit == VecScopeAccessUnit::Vector;
+  bool consumerVector = consumer.unit == VecScopeAccessUnit::Vector;
+  if (producer.kind == VecScopeAccessKind::Store &&
+      consumer.kind == VecScopeAccessKind::Load) {
+    if (producerVector)
+      return consumerVector ? MemBarKind::VST_VLD : MemBarKind::VST_LD;
+    return consumerVector ? MemBarKind::ST_VLD : MemBarKind::ST_LD;
+  }
+  if (producer.kind == VecScopeAccessKind::Store &&
+      consumer.kind == VecScopeAccessKind::Store) {
+    if (producerVector)
+      return consumerVector ? MemBarKind::VST_VST : MemBarKind::VST_ST;
+    return consumerVector ? MemBarKind::ST_VST : MemBarKind::ST_ST;
+  }
+  if (producer.kind == VecScopeAccessKind::Load &&
+      consumer.kind == VecScopeAccessKind::Store) {
+    if (producerVector)
+      return consumerVector ? MemBarKind::VLD_VST : MemBarKind::VLD_ST;
+    return consumerVector ? MemBarKind::LD_VST : MemBarKind::LD_ST;
+  }
   return std::nullopt;          // RAR
 }
 
@@ -524,7 +535,7 @@ vecscopemembar::runVecScopeMemBarAnalysis(Operation *scope) {
   bool anyFailed = false;
   unsigned order = 0;
   scope->walk([&](Operation *op) {
-    if (!isUBVectorMemoryOp(op))
+    if (!isUBMemoryOp(op))
       return;
     AccessOccurrence occ;
     occ.op = op;
@@ -536,6 +547,7 @@ vecscopemembar::runVecScopeMemBarAnalysis(Operation *scope) {
       return;
     }
     occ.kind = (*maybe).kind;
+    occ.unit = (*maybe).unit;
     occ.footprint = footprintFromDescriptor(*maybe, ivs);
     // Record enclosing loop ids (outermost first).
     for (Value iv : ivs) {
@@ -575,7 +587,7 @@ vecscopemembar::runVecScopeMemBarAnalysis(Operation *scope) {
   // --- Sequential-region RAW/WAW dependences ---
   for (unsigned i = 0; i < N; ++i) {
     for (unsigned j = i + 1; j < N; ++j) {
-      auto kind = hazardKind(A[i].kind, A[j].kind);
+      auto kind = hazardKind(A[i], A[j]);
       if (!kind)
         continue;
 
@@ -659,20 +671,25 @@ vecscopemembar::runVecScopeMemBarAnalysis(Operation *scope) {
       }
     }
 
-    // A VST_VLD barrier is placed before its consumer load. It orders all
-    // stores preceding that cut before all later vector loads, not merely the
-    // particular store/load pair that caused the barrier. This is the
-    // transitive edge that was missing for the repro in a.pto.
+    // A vector-store-to-load barrier is placed before its consumer load. It
+    // orders preceding vector stores before later loads of the consumer's
+    // unit, not merely the pair that caused the barrier.
     for (const auto &h : result.hazards) {
       if (h.scope != VecScopeHazardScope::SameIteration ||
-          h.kind != MemBarKind::VST_VLD || h.consumer >= N)
+          (h.kind != MemBarKind::VST_VLD && h.kind != MemBarKind::VST_LD) ||
+          h.consumer >= N)
         continue;
       unsigned cut = h.consumer;
       for (unsigned store = 0; store < cut; ++store) {
-        if (A[store].kind != VecScopeAccessKind::Store)
+        if (A[store].kind != VecScopeAccessKind::Store ||
+            A[store].unit != VecScopeAccessUnit::Vector)
           continue;
+        VecScopeAccessUnit loadUnit =
+            h.kind == MemBarKind::VST_LD ? VecScopeAccessUnit::Scalar
+                                         : VecScopeAccessUnit::Vector;
         for (unsigned load = cut; load < N; ++load)
-          if (A[load].kind == VecScopeAccessKind::Load)
+          if (A[load].kind == VecScopeAccessKind::Load &&
+              A[load].unit == loadUnit)
             addEdge(store, load);
       }
     }
@@ -683,6 +700,7 @@ vecscopemembar::runVecScopeMemBarAnalysis(Operation *scope) {
     // new RAW hazard was materialized for that barrier in this run.
     for (const auto &barrier : result.existingBarriers) {
       if (barrier.kind != MemBarKind::VST_VLD &&
+          barrier.kind != MemBarKind::VST_LD &&
           barrier.kind != MemBarKind::VV_ALL)
         continue;
       for (unsigned store = 0; store < N; ++store) {
@@ -691,6 +709,10 @@ vecscopemembar::runVecScopeMemBarAnalysis(Operation *scope) {
           continue;
         for (unsigned load = 0; load < N; ++load) {
           if (A[load].kind != VecScopeAccessKind::Load ||
+              (barrier.kind == MemBarKind::VST_VLD &&
+               A[load].unit != VecScopeAccessUnit::Vector) ||
+              (barrier.kind == MemBarKind::VST_LD &&
+               A[load].unit != VecScopeAccessUnit::Scalar) ||
               !isLexicallyBefore(barrier.op, A[load].op, scope))
             continue;
           addEdge(store, load);
@@ -738,7 +760,7 @@ vecscopemembar::runVecScopeMemBarAnalysis(Operation *scope) {
   // hazard; unmodelable => Unknown and no placement.
   for (unsigned i = 0; i < N; ++i) {
     for (unsigned j = 0; j < N; ++j) {
-      auto kind = hazardKind(A[i].kind, A[j].kind);
+      auto kind = hazardKind(A[i], A[j]);
       if (!kind)
         continue;
       auto pi = collectIVs(A[i].op, scope);

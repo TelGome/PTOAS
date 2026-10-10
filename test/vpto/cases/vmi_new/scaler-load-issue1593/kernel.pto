@@ -1,0 +1,90 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root of the software repository for the full text of the License.
+
+module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<vector>} {
+  func.func @scaler_load_issue1593(%src_gm: !pto.ptr<f32, gm>,
+                                   %dst_gm: !pto.ptr<f32, gm>) attributes {pto.kernel} {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c2 = arith.constant 2 : index
+    %c128 = arith.constant 128 : index
+    %c150 = arith.constant 150 : index
+    %c22 = arith.constant 22 : index
+    %c600 = arith.constant 600 : index
+    %c152 = arith.constant 152 : index
+    %c0_i64 = arith.constant 0 : i64
+    %c1_i64 = arith.constant 1 : i64
+    %c600_i64 = arith.constant 600 : i64
+    %c2400_i64 = arith.constant 2400 : i64
+    %c128_f32 = arith.constant 1.280000e+02 : f32
+    %c2_f32 = arith.constant 2.000000e+00 : f32
+
+    %ub = pto.castptr %c0_i64 : i64 -> !pto.ptr<f32, ub>
+    pto.mte_gm_ub %src_gm, %ub, %c0_i64, %c2400_i64
+      nburst(%c1_i64, %c600_i64, %c600_i64)
+      : !pto.ptr<f32, gm>, !pto.ptr<f32, ub>, i64, i64, i64, i64, i64
+    pto.set_flag["PIPE_MTE2", "PIPE_V", "EVENT_ID0"]
+    pto.wait_flag["PIPE_MTE2", "PIPE_V", "EVENT_ID0"]
+
+    pto.vecscope {
+      %_0 = scf.for %q = %c0 to %c2 step %c1 iter_args(%remaining = %c150) -> (index) {
+        %mask = pto.vmi.create_mask %remaining : index -> !pto.vmi.mask<128xpred>
+        %offset = arith.muli %q, %c128 : index
+        %x = pto.vmi.vload %ub[%offset] : !pto.ptr<f32, ub> -> !pto.vmi.vreg<128xf32>
+        %two = pto.vmi.vbrc %c2_f32 : f32 -> !pto.vmi.vreg<128xf32>
+        %scaled = pto.vmi.vmul %x, %two, %mask
+          : !pto.vmi.vreg<128xf32>, !pto.vmi.vreg<128xf32>, !pto.vmi.mask<128xpred>
+          -> !pto.vmi.vreg<128xf32>
+        pto.vmi.vstore %scaled, %ub[%offset], %mask
+          : !pto.vmi.vreg<128xf32>, !pto.ptr<f32, ub>, !pto.vmi.mask<128xpred>
+        %next = arith.subi %remaining, %c128 : index
+        scf.yield %next : index
+      }
+
+      %red_mask = pto.vmi.create_mask %c128 : index -> !pto.vmi.mask<128xpred>
+      %x0 = pto.vmi.vload %ub[%c0] : !pto.ptr<f32, ub> -> !pto.vmi.vreg<128xf32>
+      %x1 = pto.vmi.vload %ub[%c128] : !pto.ptr<f32, ub> -> !pto.vmi.vreg<128xf32>
+      %tail_mask = pto.vmi.create_mask %c22 : index -> !pto.vmi.mask<128xpred>
+      %mx = pto.vmi.vmax %x0, %x1
+        : !pto.vmi.vreg<128xf32>, !pto.vmi.vreg<128xf32> -> !pto.vmi.vreg<128xf32>
+      %selected = pto.vmi.vsel %tail_mask, %mx, %x0
+        : !pto.vmi.mask<128xpred>, !pto.vmi.vreg<128xf32>, !pto.vmi.vreg<128xf32>
+        -> !pto.vmi.vreg<128xf32>
+      %max_val = pto.vmi.vcmax %selected, %red_mask
+        : !pto.vmi.vreg<128xf32>, !pto.vmi.mask<128xpred> -> !pto.vmi.vreg<1xf32>
+      %max_brc = pto.vmi.vbrc %max_val {group = 1}
+        : !pto.vmi.vreg<1xf32> -> !pto.vmi.vreg<128xf32>
+      %one_mask = pto.vmi.create_mask %c1 : index -> !pto.vmi.mask<128xpred>
+      pto.vmi.vstore %max_brc, %ub[%c152], %one_mask
+        : !pto.vmi.vreg<128xf32>, !pto.ptr<f32, ub>, !pto.vmi.mask<128xpred>
+
+      %_1 = scf.for %q = %c0 to %c2 step %c1 iter_args(%remaining = %c150) -> (index) {
+        %mask = pto.vmi.create_mask %remaining : index -> !pto.vmi.mask<128xpred>
+        %offset = arith.muli %q, %c128 : index
+        %x = pto.vmi.vload %ub[%offset] : !pto.ptr<f32, ub> -> !pto.vmi.vreg<128xf32>
+        %scale = pto.load %ub[%c152] : !pto.ptr<f32, ub> -> f32
+        %scale_vec = pto.vmi.vbrc %scale : f32 -> !pto.vmi.vreg<128xf32>
+        %out = pto.vmi.vmul %x, %scale_vec, %mask
+          : !pto.vmi.vreg<128xf32>, !pto.vmi.vreg<128xf32>, !pto.vmi.mask<128xpred>
+          -> !pto.vmi.vreg<128xf32>
+        pto.vmi.vstore %out, %ub[%offset], %mask
+          : !pto.vmi.vreg<128xf32>, !pto.ptr<f32, ub>, !pto.vmi.mask<128xpred>
+        %next = arith.subi %remaining, %c128 : index
+        scf.yield %next : index
+      }
+    }
+
+    pto.set_flag["PIPE_V", "PIPE_MTE3", "EVENT_ID0"]
+    pto.wait_flag["PIPE_V", "PIPE_MTE3", "EVENT_ID0"]
+    pto.mte_ub_gm %ub, %dst_gm, %c600_i64
+      nburst(%c1_i64, %c600_i64, %c600_i64)
+      : !pto.ptr<f32, ub>, !pto.ptr<f32, gm>, i64, i64, i64, i64
+    pto.barrier #pto.pipe<PIPE_ALL>
+    return
+  }
+}
