@@ -10,7 +10,7 @@
 //
 // Applies a barrier plan to the IR. Validates anchors, de-dupes
 // by anchor/kind (done in placement), normalizes multiple directed kinds at
-// one anchor to a single VV_ALL, inserts `pto.mem_bar` with an IRRewriter in
+// one anchor to each family's ALL barrier, inserts `pto.mem_bar` with an IRRewriter in
 // deterministic order, and performs no new alias/hazard reasoning.
 //
 //===----------------------------------------------------------------------===//
@@ -58,11 +58,12 @@ LogicalResult vecscopemembar::applyVecScopeMemBarPlan(
   for (const auto &bp : plan.barriers) {
     if (!anchorIsValid(result, bp.anchor))
       return failure();
-    if (bp.kind == MemBarKind::VV_ALL) {
+    if (static_cast<unsigned>(bp.kind) % 4 == 0) {
       if (auto existing =
               dyn_cast_or_null<pto::MemBarOp>(bp.anchor->getPrevNode())) {
         MemBarKind existingKind = existing.getKind().getKind();
-        if (existingKind != MemBarKind::VV_ALL)
+        if (static_cast<unsigned>(existingKind) / 4 ==
+            static_cast<unsigned>(bp.kind) / 4 && existingKind != bp.kind)
           existing.erase();
       }
     }

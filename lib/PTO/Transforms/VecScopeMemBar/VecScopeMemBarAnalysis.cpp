@@ -607,7 +607,7 @@ vecscopemembar::runVecScopeMemBarAnalysis(Operation *scope) {
                       DependenceReason::DynamicUnmodelledExpression);
         continue;
       }
-      // Delay WAR materialization until all RAW barriers are known. A WAR
+      // Delay load-to-store materialization until all RAW barriers are known. A WAR
       // chain may be indirect:
       //
       //   load A -> value -> store B --VST_VLD--> load C -> value -> store A
@@ -615,7 +615,8 @@ vecscopemembar::runVecScopeMemBarAnalysis(Operation *scope) {
       // The first store-to-load edge is supplied by SSA, while VST_VLD orders
       // every store before the later load. Checking only load A's direct
       // value flow into the final store A would incorrectly add VLD_VST.
-      if (*kind == MemBarKind::VLD_VST) {
+      if (A[i].kind == VecScopeAccessKind::Load &&
+          A[j].kind == VecScopeAccessKind::Store) {
         pendingWAR.push_back({i, j});
         continue;
       }
@@ -671,22 +672,27 @@ vecscopemembar::runVecScopeMemBarAnalysis(Operation *scope) {
       }
     }
 
-    // A vector-store-to-load barrier is placed before its consumer load. It
-    // orders preceding vector stores before later loads of the consumer's
-    // unit, not merely the pair that caused the barrier.
+    // A store-to-load barrier is placed before its consumer load. It orders
+    // preceding stores of the producer's unit before later loads of the
+    // consumer's unit, not merely the pair that caused the barrier.
     for (const auto &h : result.hazards) {
       if (h.scope != VecScopeHazardScope::SameIteration ||
-          (h.kind != MemBarKind::VST_VLD && h.kind != MemBarKind::VST_LD) ||
+          (h.kind != MemBarKind::VST_VLD && h.kind != MemBarKind::VST_LD &&
+           h.kind != MemBarKind::ST_VLD && h.kind != MemBarKind::ST_LD) ||
           h.consumer >= N)
         continue;
       unsigned cut = h.consumer;
       for (unsigned store = 0; store < cut; ++store) {
         if (A[store].kind != VecScopeAccessKind::Store ||
-            A[store].unit != VecScopeAccessUnit::Vector)
+            A[store].unit != (h.kind == MemBarKind::VST_VLD ||
+                                      h.kind == MemBarKind::VST_LD
+                                  ? VecScopeAccessUnit::Vector
+                                  : VecScopeAccessUnit::Scalar))
           continue;
         VecScopeAccessUnit loadUnit =
-            h.kind == MemBarKind::VST_LD ? VecScopeAccessUnit::Scalar
-                                         : VecScopeAccessUnit::Vector;
+            h.kind == MemBarKind::VST_VLD || h.kind == MemBarKind::ST_VLD
+                ? VecScopeAccessUnit::Vector
+                : VecScopeAccessUnit::Scalar;
         for (unsigned load = cut; load < N; ++load)
           if (A[load].kind == VecScopeAccessKind::Load &&
               A[load].unit == loadUnit)
@@ -701,18 +707,25 @@ vecscopemembar::runVecScopeMemBarAnalysis(Operation *scope) {
     for (const auto &barrier : result.existingBarriers) {
       if (barrier.kind != MemBarKind::VST_VLD &&
           barrier.kind != MemBarKind::VST_LD &&
+          barrier.kind != MemBarKind::ST_VLD &&
+          barrier.kind != MemBarKind::ST_LD &&
+          barrier.kind != MemBarKind::VS_ALL &&
+          barrier.kind != MemBarKind::SV_ALL &&
+          barrier.kind != MemBarKind::SS_ALL &&
           barrier.kind != MemBarKind::VV_ALL)
         continue;
       for (unsigned store = 0; store < N; ++store) {
         if (A[store].kind != VecScopeAccessKind::Store ||
+            A[store].unit != (static_cast<unsigned>(barrier.kind) / 4 < 2
+                                  ? VecScopeAccessUnit::Vector
+                                  : VecScopeAccessUnit::Scalar) ||
             !isLexicallyBefore(A[store].op, barrier.op, scope))
           continue;
         for (unsigned load = 0; load < N; ++load) {
           if (A[load].kind != VecScopeAccessKind::Load ||
-              (barrier.kind == MemBarKind::VST_VLD &&
-               A[load].unit != VecScopeAccessUnit::Vector) ||
-              (barrier.kind == MemBarKind::VST_LD &&
-               A[load].unit != VecScopeAccessUnit::Scalar) ||
+              A[load].unit != (static_cast<unsigned>(barrier.kind) / 4 % 2 == 0
+                                   ? VecScopeAccessUnit::Vector
+                                   : VecScopeAccessUnit::Scalar) ||
               !isLexicallyBefore(barrier.op, A[load].op, scope))
             continue;
           addEdge(store, load);
@@ -741,7 +754,7 @@ vecscopemembar::runVecScopeMemBarAnalysis(Operation *scope) {
       h.id = result.hazards.size();
       h.producer = load;
       h.consumer = store;
-      h.kind = MemBarKind::VLD_VST;
+      h.kind = hazardKind(A[load], A[store]).value();
       h.scope = VecScopeHazardScope::SameIteration;
       h.sameIterationAnchor =
           findSameIterationAnchor(A[load].op, A[store].op, scope);

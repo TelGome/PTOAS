@@ -10,8 +10,8 @@
 //
 // Solves barrier placement from the read-only analysis result. Picks a
 // provably-mandatory anchor for each hazard relation, merges same-kind
-// hazards at the same anchor, collapses multiple kinds at one anchor to
-// VV_ALL, and recognizes existing-barrier coverage. Outputs a deterministic
+// hazards at the same anchor, collapses multiple kinds in the same family at one anchor to
+// that family's ALL barrier, and recognizes existing-barrier coverage. Outputs a deterministic
 // plan; does not mutate the IR.
 //
 //===----------------------------------------------------------------------===//
@@ -85,6 +85,16 @@ static bool coversHazardSet(ArrayRef<unsigned> covering,
                        covered.end());
 }
 
+// Enum values encode four families, each with an ALL and three directed kinds.
+static bool barrierCovers(MemBarKind covering, MemBarKind covered) {
+  const auto family = [](MemBarKind kind) {
+    return static_cast<unsigned>(kind) / 4;
+  };
+  return covering == covered ||
+         (family(covering) == family(covered) &&
+          static_cast<unsigned>(covering) % 4 == 0);
+}
+
 static bool coveredByExisting(Operation *anchor, MemBarKind kind,
                               bool isLoopLatch, scf::ForOp carryingLoop,
                               ArrayRef<ExistingBarrier> existing) {
@@ -94,7 +104,7 @@ static bool coveredByExisting(Operation *anchor, MemBarKind kind,
   for (const auto &b : existing) {
     if (b.op != prev)
       continue;
-    if (b.kind != kind && b.kind != MemBarKind::VV_ALL)
+    if (!barrierCovers(b.kind, kind))
       continue;
     if (isLoopLatch) {
       // Must be on the same carrying loop's backedge.
@@ -332,7 +342,59 @@ FailureOr<VecScopeMemBarPlan> vecscopemembar::solveVecScopeMemBarPlacement(
     }
   }
 
-  // Per-anchor kinds. Multiple kinds at one anchor -> VV_ALL.
+  // Generalize the WAW proof to multi-hop scalar/vector relays. A store can
+  // be ordered before a later store through store-to-load barriers and SSA
+  // value edges, even when the relay contains scalar stores and loads.
+  for (const auto &candidate : result.hazards) {
+    if (candidate.scope != VecScopeHazardScope::SameIteration ||
+        candidate.kind != MemBarKind::VST_VST ||
+        redundantHazards.contains(candidate.id))
+      continue;
+    const unsigned count = A.size();
+    SmallVector<SmallVector<unsigned, 4>, 16> edges(count);
+    auto addEdge = [&](unsigned from, unsigned to) {
+      if (!llvm::is_contained(edges[from], to))
+        edges[from].push_back(to);
+    };
+    for (const auto &h : result.hazards) {
+      if (h.id != candidate.id &&
+          h.scope == VecScopeHazardScope::SameIteration)
+        addEdge(h.producer, h.consumer);
+    }
+    for (unsigned load = 0; load < count; ++load) {
+      if (A[load].kind != VecScopeAccessKind::Load)
+        continue;
+      auto loaded = getLoadedValues(A[load].op);
+      for (unsigned store = load + 1; store < count; ++store) {
+        if (A[store].kind != VecScopeAccessKind::Store)
+          continue;
+        auto stored = getStoredValues(A[store].op);
+        bool depends = false;
+        for (Value sv : stored)
+          for (Value lv : loaded)
+            depends |= valueDependsOn(sv, lv);
+        if (depends)
+          addEdge(load, store);
+      }
+    }
+    SmallVector<bool, 16> reachable(count, false);
+    SmallVector<unsigned, 16> worklist;
+    reachable[candidate.producer] = true;
+    worklist.push_back(candidate.producer);
+    while (!worklist.empty()) {
+      unsigned current = worklist.pop_back_val();
+      for (unsigned next : edges[current]) {
+        if (!reachable[next]) {
+          reachable[next] = true;
+          worklist.push_back(next);
+        }
+      }
+    }
+    if (reachable[candidate.consumer])
+      redundantHazards.insert(candidate.id);
+  }
+
+  // Merge kinds within each family; retain separate cross-family barriers.
   DenseMap<AnchorKey, SmallVector<BarrierKindHazards>, AnchorKeyInfo>
       anchorKinds;
   // Anchors that are genuine loop-latch cuts (carrying-loop terminator),
@@ -358,11 +420,11 @@ FailureOr<VecScopeMemBarPlan> vecscopemembar::solveVecScopeMemBarPlacement(
 
     // A different directed barrier already immediately before this anchor is
     // part of the required cut as well. Normalize it together with the newly
-    // discovered kind to VV_ALL instead of leaving two adjacent directed bars.
+    // discovered kind within its family.
     Operation *prev = anchor->getPrevNode();
     for (const auto &existing : result.existingBarriers) {
       if (existing.op != prev || existing.kind == kind ||
-          existing.kind == MemBarKind::VV_ALL)
+          barrierCovers(existing.kind, kind))
         continue;
       if (isLoopLatch && carryingLoop &&
           existing.op->getParentOfType<scf::ForOp>() != carryingLoop)
@@ -421,24 +483,36 @@ FailureOr<VecScopeMemBarPlan> vecscopemembar::solveVecScopeMemBarPlacement(
     if (it == anchorKinds.end())
       continue;
     auto &kinds = it->second;
-    BarrierPlacement bp;
-    bp.anchor = anchor;
-    bp.kind = kinds.front().kind;
-    if (kinds.size() > 1)
-      bp.kind = MemBarKind::VV_ALL; // multiple kinds -> VV_ALL
-    bp.anchorKind = latchAnchors.count({anchor})
-                        ? BarrierAnchorKind::BeforeLoopTerminator
-                        : BarrierAnchorKind::BeforeOperation;
-    for (const auto &entry : kinds)
-      for (unsigned hazardId : entry.hazards)
-        appendUniqueHazard(bp.resolvedHazards, hazardId);
-    sortUniqueHazards(bp.resolvedHazards);
-    plan.barriers.push_back(bp);
+    for (unsigned family = 0; family < 4; ++family) {
+      BarrierPlacement bp;
+      bp.anchor = anchor;
+      unsigned kindCount = 0;
+      for (const auto &entry : kinds) {
+        if (static_cast<unsigned>(entry.kind) / 4 != family) {
+          continue;
+        }
+        bp.kind = entry.kind;
+        ++kindCount;
+        for (unsigned hazardId : entry.hazards) {
+          appendUniqueHazard(bp.resolvedHazards, hazardId);
+        }
+      }
+      if (kindCount == 0) {
+        continue;
+      }
+      if (kindCount > 1) {
+        bp.kind = static_cast<MemBarKind>(family * 4);
+      }
+      bp.anchorKind = latchAnchors.count({anchor})
+                          ? BarrierAnchorKind::BeforeLoopTerminator
+                          : BarrierAnchorKind::BeforeOperation;
+      sortUniqueHazards(bp.resolvedHazards);
+      plan.barriers.push_back(bp);
+    }
   }
 
   // Normalize each candidate's hazard set before comparing candidates. The
-  // set is intentionally independent of barrier kind: VV_ALL at an anchor
-  // resolves the union of all directed hazards collected there.
+  // set contains only hazards from the candidate barrier's family.
   for (auto &barrier : plan.barriers)
     sortUniqueHazards(barrier.resolvedHazards);
 
@@ -452,10 +526,10 @@ FailureOr<VecScopeMemBarPlan> vecscopemembar::solveVecScopeMemBarPlacement(
     if (lhs.anchorKind == BarrierAnchorKind::BeforeLoopTerminator ||
         rhs.anchorKind == BarrierAnchorKind::BeforeLoopTerminator)
       return false;
-    // VV_ALL is a valid covering barrier for every directed hazard. A
-    // directed barrier can cover only the same directed kind; comparing the
+    // An ALL barrier covers directed hazards only in its own family.
+    // A directed barrier covers the same kind; comparing the
     // resolved hazard sets alone is not sufficient to establish this.
-    if (lhs.kind != MemBarKind::VV_ALL && lhs.kind != rhs.kind)
+    if (!barrierCovers(lhs.kind, rhs.kind))
       return false;
     if (!lhs.anchor || !rhs.anchor ||
         lhs.anchor->getBlock() != rhs.anchor->getBlock())
