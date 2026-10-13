@@ -544,6 +544,22 @@ FailureOr<VecMemoryAccessDescriptor>
 vecscopemembar::buildAccessDescriptor(Operation *op, ArrayRef<Value> ivs) {
   VecMemoryAccessDescriptor desc;
 
+  // Scalar pointer ops and SIMT load/store have the same element-offset UB
+  // footprint when used inside a vecscope.
+  if (auto load = dyn_cast<pto::LoadScalarOp>(op)) {
+    desc.kind = VecScopeAccessKind::Load;
+    desc.unit = VecScopeAccessUnit::Scalar;
+    fillContiguous(desc, load.getPtr(), load.getOffset(),
+                   elementByteSize(load.getPtr().getType()), uint64_t(1), ivs);
+    return desc;
+  }
+  if (auto store = dyn_cast<pto::StoreScalarOp>(op)) {
+    desc.kind = VecScopeAccessKind::Store;
+    desc.unit = VecScopeAccessUnit::Scalar;
+    fillContiguous(desc, store.getPtr(), store.getOffset(),
+                   elementByteSize(store.getPtr().getType()), uint64_t(1), ivs);
+    return desc;
+  }
   if (auto load = dyn_cast<pto::PTOLoadOp>(op)) {
     desc.kind = VecScopeAccessKind::Load;
     desc.unit = VecScopeAccessUnit::Scalar;

@@ -18,6 +18,12 @@ using namespace mlir::pto::vecscopemembar;
 
 namespace {
 
+// Both public scalar pointer spellings lower to scalar loads/stores inside a
+// vecscope. Memory effects alone do not distinguish these from vector traffic.
+static bool isScalarAccess(Operation *op) {
+  return isa<pto::SimtOpInterface, pto::LoadScalarOp, pto::StoreScalarOp>(op);
+}
+
 static bool hasUBEffect(Operation *op, bool wantRead, bool wantWrite) {
   auto iface = dyn_cast<MemoryEffectOpInterface>(op);
   if (!iface)
@@ -51,30 +57,31 @@ bool vecscopemembar::isUBBackedType(Type type) {
 }
 
 bool vecscopemembar::isUBVectorStore(Operation *op) {
-  return hasUBEffect(op, /*wantRead=*/false, /*wantWrite=*/true);
+  return !isScalarAccess(op) &&
+         hasUBEffect(op, /*wantRead=*/false, /*wantWrite=*/true);
 }
 
 bool vecscopemembar::isUBVectorLoad(Operation *op) {
-  return hasUBEffect(op, /*wantRead=*/true, /*wantWrite=*/false);
+  return !isScalarAccess(op) &&
+         hasUBEffect(op, /*wantRead=*/true, /*wantWrite=*/false);
 }
 
 bool vecscopemembar::isUBVectorMemoryOp(Operation *op) {
-  return (!isa<pto::SimtOpInterface>(op)) &&
-         (isUBVectorStore(op) || isUBVectorLoad(op));
+  return isUBVectorStore(op) || isUBVectorLoad(op);
 }
 
 bool vecscopemembar::isUBScalarMemoryOp(Operation *op) {
-  return isa<pto::SimtOpInterface>(op) &&
+  return isScalarAccess(op) &&
          (hasUBEffect(op, /*wantRead=*/true, /*wantWrite=*/true));
 }
 
 bool vecscopemembar::isUBScalarStore(Operation *op) {
-  return isa<pto::SimtOpInterface>(op) &&
+  return isScalarAccess(op) &&
          hasUBEffect(op, /*wantRead=*/false, /*wantWrite=*/true);
 }
 
 bool vecscopemembar::isUBScalarLoad(Operation *op) {
-  return isa<pto::SimtOpInterface>(op) &&
+  return isScalarAccess(op) &&
          hasUBEffect(op, /*wantRead=*/true, /*wantWrite=*/false);
 }
 
@@ -85,6 +92,8 @@ bool vecscopemembar::isUBMemoryOp(Operation *op) {
 SmallVector<Value, 2> vecscopemembar::getStoredValues(Operation *storeOp) {
   SmallVector<Value, 2> out;
   if (auto s = dyn_cast<pto::PTOStoreOp>(storeOp)) {
+    out.push_back(s.getValue());
+  } else if (auto s = dyn_cast<pto::StoreScalarOp>(storeOp)) {
     out.push_back(s.getValue());
   } else if (auto s = dyn_cast<pto::VstsOp>(storeOp)) {
     out.push_back(s.getValue());
@@ -99,6 +108,8 @@ SmallVector<Value, 2> vecscopemembar::getLoadedValues(Operation *loadOp) {
   SmallVector<Value, 2> out;
   if (auto l = dyn_cast<pto::PTOLoadOp>(loadOp)) {
     out.push_back(l.getResult());
+  } else if (auto l = dyn_cast<pto::LoadScalarOp>(loadOp)) {
+    out.push_back(l.getValue());
   } else if (auto l = dyn_cast<pto::VldsOp>(loadOp)) {
     if (Value r = l.getResult())
       out.push_back(r);

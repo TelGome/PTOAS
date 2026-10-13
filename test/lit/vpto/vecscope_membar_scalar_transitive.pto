@@ -1,0 +1,208 @@
+// Copyright (c) 2026 Huawei Technologies Co., Ltd.
+// This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+// CANN Open Software License Agreement Version 2.0 (the "License").
+// Please refer to the License for details. You may not use this file except in compliance with the License.
+// THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+// INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+// See LICENSE in the root of the software repository for the full text of the License.
+
+// RUN: pto-test-opt --pto-insert-vecscope-membar %s -o %t
+// RUN: FileCheck %s < %t
+// RUN: pto-test-opt --pto-insert-vecscope-membar %t | FileCheck %s
+// RUN: sed -e '/pto.load /{s/pto.load /pto.load_scalar /;s/!pto.ptr</</;}' -e '/pto.store /{s/pto.store /pto.store_scalar /;s/!pto.ptr</</;}' %s | pto-test-opt --pto-insert-vecscope-membar | FileCheck %s
+
+// Preserve typed hazards when a fence or an unconditional SSA relay is absent.
+
+module attributes {pto.target_arch = "a5"} {
+  // CHECK-LABEL: func.func @nonalias_fence_relay
+  // CHECK: pto.mem_bar "VST_LD"
+  // CHECK-NEXT: %[[S:.*]] = pto.load
+  // CHECK-NEXT: pto.store{{(_scalar)?}} %[[S]]
+  // CHECK-NEXT: pto.mem_bar "ST_LD"
+  // CHECK-NEXT: %{{.*}} = pto.load
+  // CHECK-NOT: pto.mem_bar
+  // CHECK: return
+  func.func @nonalias_fence_relay(%n: index, %cond: i1) {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c256 = arith.constant 256 : index
+    %c512 = arith.constant 512 : index
+    %zero = arith.constant 0 : i64
+    %one = arith.constant 1.0 : f32
+    %ub = pto.castptr %zero : i64 -> !pto.ptr<f32, ub>
+    pto.vecscope {
+      %mask = pto.pset_b32 "PAT_ALL" : !pto.mask<b32>
+      %v = pto.vdup %one, %mask : f32, !pto.mask<b32> -> !pto.vreg<64xf32>
+      pto.vsts %v, %ub[%c0], %mask : !pto.vreg<64xf32>, !pto.ptr<f32, ub>, !pto.mask<b32>
+      pto.vsts %v, %ub[%c256], %mask : !pto.vreg<64xf32>, !pto.ptr<f32, ub>, !pto.mask<b32>
+      %s = pto.load %ub[%c0] : !pto.ptr<f32, ub> -> f32
+      pto.store %s, %ub[%c256] : !pto.ptr<f32, ub>, f32
+      %reload = pto.load %ub[%c256] : !pto.ptr<f32, ub> -> f32
+      pto.store %reload, %ub[%c512] : !pto.ptr<f32, ub>, f32
+    }
+    return
+  }
+
+  // CHECK-LABEL: func.func @missing_value_relay
+  // CHECK: pto.mem_bar "VST_LD"
+  // CHECK-NEXT: %{{.*}} = pto.load
+  // CHECK-NEXT: pto.mem_bar "VST_ST"
+  // CHECK-NEXT: pto.store
+  // CHECK: return
+  func.func @missing_value_relay(%n: index, %cond: i1) {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c256 = arith.constant 256 : index
+    %c512 = arith.constant 512 : index
+    %zero = arith.constant 0 : i64
+    %one = arith.constant 1.0 : f32
+    %ub = pto.castptr %zero : i64 -> !pto.ptr<f32, ub>
+    pto.vecscope {
+      %mask = pto.pset_b32 "PAT_ALL" : !pto.mask<b32>
+      %v = pto.vdup %one, %mask : f32, !pto.mask<b32> -> !pto.vreg<64xf32>
+      pto.vsts %v, %ub[%c0], %mask : !pto.vreg<64xf32>, !pto.ptr<f32, ub>, !pto.mask<b32>
+      pto.vsts %v, %ub[%c256], %mask : !pto.vreg<64xf32>, !pto.ptr<f32, ub>, !pto.mask<b32>
+      %s = pto.load %ub[%c0] : !pto.ptr<f32, ub> -> f32
+      pto.store %one, %ub[%c256] : !pto.ptr<f32, ub>, f32
+      pto.store %s, %ub[%c512] : !pto.ptr<f32, ub>, f32
+    }
+    return
+  }
+
+  // CHECK-LABEL: func.func @producer_after_fence
+  // CHECK: pto.mem_bar "VST_LD"
+  // CHECK-NEXT: %{{.*}} = pto.load
+  // CHECK-NEXT: pto.vsts
+  // CHECK-NEXT: pto.mem_bar "VST_ST"
+  // CHECK-NEXT: pto.store
+  // CHECK: return
+  func.func @producer_after_fence(%n: index, %cond: i1) {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c256 = arith.constant 256 : index
+    %c512 = arith.constant 512 : index
+    %zero = arith.constant 0 : i64
+    %one = arith.constant 1.0 : f32
+    %ub = pto.castptr %zero : i64 -> !pto.ptr<f32, ub>
+    pto.vecscope {
+      %mask = pto.pset_b32 "PAT_ALL" : !pto.mask<b32>
+      %v = pto.vdup %one, %mask : f32, !pto.mask<b32> -> !pto.vreg<64xf32>
+      pto.vsts %v, %ub[%c0], %mask : !pto.vreg<64xf32>, !pto.ptr<f32, ub>, !pto.mask<b32>
+      %s = pto.load %ub[%c0] : !pto.ptr<f32, ub> -> f32
+      pto.vsts %v, %ub[%c256], %mask : !pto.vreg<64xf32>, !pto.ptr<f32, ub>, !pto.mask<b32>
+      pto.store %s, %ub[%c256] : !pto.ptr<f32, ub>, f32
+    }
+    return
+  }
+
+  // CHECK-LABEL: func.func @wrong_fence_family
+  // CHECK: pto.mem_bar "VST_VLD"
+  // CHECK-NEXT: %{{.*}} = pto.load
+  // CHECK-NEXT: pto.mem_bar "VST_ST"
+  // CHECK-NEXT: pto.store
+  // CHECK: return
+  func.func @wrong_fence_family(%n: index, %cond: i1) {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c256 = arith.constant 256 : index
+    %c512 = arith.constant 512 : index
+    %zero = arith.constant 0 : i64
+    %one = arith.constant 1.0 : f32
+    %ub = pto.castptr %zero : i64 -> !pto.ptr<f32, ub>
+    pto.vecscope {
+      %mask = pto.pset_b32 "PAT_ALL" : !pto.mask<b32>
+      %v = pto.vdup %one, %mask : f32, !pto.mask<b32> -> !pto.vreg<64xf32>
+      pto.vsts %v, %ub[%c256], %mask : !pto.vreg<64xf32>, !pto.ptr<f32, ub>, !pto.mask<b32>
+      pto.mem_bar "VST_VLD"
+      %s = pto.load %ub[%c0] : !pto.ptr<f32, ub> -> f32
+      pto.store %s, %ub[%c256] : !pto.ptr<f32, ub>, f32
+    }
+    return
+  }
+
+  // CHECK-LABEL: func.func @existing_fence_relay
+  // CHECK: pto.mem_bar "VST_LD"
+  // CHECK-NEXT: %[[S:.*]] = pto.load
+  // CHECK-NEXT: pto.store{{(_scalar)?}} %[[S]]
+  // CHECK-NOT: pto.mem_bar
+  // CHECK: return
+  func.func @existing_fence_relay(%n: index, %cond: i1) {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c256 = arith.constant 256 : index
+    %c512 = arith.constant 512 : index
+    %zero = arith.constant 0 : i64
+    %one = arith.constant 1.0 : f32
+    %ub = pto.castptr %zero : i64 -> !pto.ptr<f32, ub>
+    pto.vecscope {
+      %mask = pto.pset_b32 "PAT_ALL" : !pto.mask<b32>
+      %v = pto.vdup %one, %mask : f32, !pto.mask<b32> -> !pto.vreg<64xf32>
+      pto.vsts %v, %ub[%c256], %mask : !pto.vreg<64xf32>, !pto.ptr<f32, ub>, !pto.mask<b32>
+      pto.mem_bar "VST_LD"
+      %s = pto.load %ub[%c0] : !pto.ptr<f32, ub> -> f32
+      pto.store %s, %ub[%c256] : !pto.ptr<f32, ub>, f32
+    }
+    return
+  }
+
+  // CHECK-LABEL: func.func @possibly_empty_relay
+  // CHECK: scf.for
+  // CHECK: pto.mem_bar "VST_LD"
+  // CHECK: scf.yield
+  // CHECK: pto.mem_bar "VST_ST"
+  // CHECK-NEXT: pto.store
+  // CHECK: return
+  func.func @possibly_empty_relay(%n: index, %cond: i1) {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c256 = arith.constant 256 : index
+    %c512 = arith.constant 512 : index
+    %zero = arith.constant 0 : i64
+    %one = arith.constant 1.0 : f32
+    %ub = pto.castptr %zero : i64 -> !pto.ptr<f32, ub>
+    pto.vecscope {
+      %mask = pto.pset_b32 "PAT_ALL" : !pto.mask<b32>
+      %v = pto.vdup %one, %mask : f32, !pto.mask<b32> -> !pto.vreg<64xf32>
+      pto.vsts %v, %ub[%c256], %mask : !pto.vreg<64xf32>, !pto.ptr<f32, ub>, !pto.mask<b32>
+      %s = scf.for %i = %c0 to %n step %c1 iter_args(%acc = %one) -> (f32) {
+        pto.mem_bar "VST_LD"
+        %x = pto.load %ub[%c0] : !pto.ptr<f32, ub> -> f32
+        scf.yield %x : f32
+      }
+      pto.store %s, %ub[%c256] : !pto.ptr<f32, ub>, f32
+    }
+    return
+  }
+
+  // CHECK-LABEL: func.func @conditional_relay
+  // CHECK: scf.if
+  // CHECK: pto.mem_bar "VST_LD"
+  // CHECK: } else {
+  // CHECK: pto.mem_bar "VST_ST"
+  // CHECK-NEXT: pto.store
+  // CHECK: return
+  func.func @conditional_relay(%n: index, %cond: i1) {
+    %c0 = arith.constant 0 : index
+    %c1 = arith.constant 1 : index
+    %c256 = arith.constant 256 : index
+    %c512 = arith.constant 512 : index
+    %zero = arith.constant 0 : i64
+    %one = arith.constant 1.0 : f32
+    %ub = pto.castptr %zero : i64 -> !pto.ptr<f32, ub>
+    pto.vecscope {
+      %mask = pto.pset_b32 "PAT_ALL" : !pto.mask<b32>
+      %v = pto.vdup %one, %mask : f32, !pto.mask<b32> -> !pto.vreg<64xf32>
+      pto.vsts %v, %ub[%c256], %mask : !pto.vreg<64xf32>, !pto.ptr<f32, ub>, !pto.mask<b32>
+      %s = scf.if %cond -> (f32) {
+        pto.mem_bar "VST_LD"
+        %x = pto.load %ub[%c0] : !pto.ptr<f32, ub> -> f32
+        scf.yield %x : f32
+      } else {
+        scf.yield %one : f32
+      }
+      pto.store %s, %ub[%c256] : !pto.ptr<f32, ub>, f32
+    }
+    return
+  }
+
+}

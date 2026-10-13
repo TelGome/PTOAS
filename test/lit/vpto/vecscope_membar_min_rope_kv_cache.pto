@@ -89,9 +89,10 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
 }
 
 
-// Real regression reproducer: the three RAW cuts require three VST_VLD
-// barriers, while no VLD_VST barrier is needed. The first two barriers also
-// cover the intervening WAW cases, so they remain VST_VLD cuts.
+// The two VST_VLD cuts cover the RAW and intervening WAW hazards.
+// The final load reads rot_lo (UB byte 1536), whose write precedes the
+// second cut; the intervening rot_hi store writes UB byte 1024.
+// A third VST_VLD before the rot_lo load is therefore redundant.
 
 // CHECK-LABEL: func.func @min_rope_kv_cache
 // CHECK: pto.vecscope
@@ -102,5 +103,6 @@ module attributes {pto.target_arch = "a5", pto.kernel_kind = #pto.kernel_kind<ve
 // CHECK: pto.mem_bar "VST_VLD"
 // CHECK: pto.vlds
 // CHECK: pto.vsts
-// CHECK-NEXT: pto.mem_bar "VST_VLD"
-// CHECK: pto.vlds
+// CHECK-NEXT: %{{.*}} = pto.vlds
+// CHECK-NOT: pto.mem_bar
+// CHECK: return

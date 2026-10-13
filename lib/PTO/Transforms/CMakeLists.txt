@@ -105,6 +105,7 @@ add_mlir_dialect_library(PTOTransforms
   VecScopeMemBar/VecScopeMemBarIR.cpp
   VecScopeMemBar/VecScopeMemBarAnalysis.cpp
   VecScopeMemBar/VecScopeMemBarPlacement.cpp
+  VecScopeMemBar/VecScopeMemBarRedundancy.cpp
   VecScopeMemBar/VecScopeMemBarCodegen.cpp
   VecScopeMemBar/PTOInsertVecScopeMemBarPass.cpp
   VecScopeMemBar/PTOInsertVecScopeMemBarAllPass.cpp

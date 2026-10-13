@@ -39,6 +39,11 @@ struct VecScopeMemBarPlan {
 FailureOr<VecScopeMemBarPlan>
 solveVecScopeMemBarPlacement(const VecScopeMemBarAnalysisResult &result);
 
+// Preserve the planned hazard obligations while removing cuts whose ordering
+// is already provided by other barriers and straight-line SSA dependencies.
+void eliminateTransitiveMemBars(const VecScopeMemBarAnalysisResult &result,
+                               VecScopeMemBarPlan &plan);
+
 } // namespace mlir::pto::vecscopemembar
 
 #endif // PTO_TRANSFORMS_VECSCOPEMEMBAR_VECSCOPEMEMBARPLACEMENT_H

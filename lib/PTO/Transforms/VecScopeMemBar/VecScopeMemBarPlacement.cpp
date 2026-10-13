@@ -12,7 +12,8 @@
 // provably-mandatory anchor for each hazard relation, merges same-kind
 // hazards at the same anchor, collapses multiple kinds in the same family at one anchor to
 // that family's ALL barrier, and recognizes existing-barrier coverage. Outputs a deterministic
-// plan; does not mutate the IR.
+// plan; does not mutate the IR. The final redundancy check preserves planned
+// hazards using the ordering of surviving barriers and SSA value dependencies.
 //
 //===----------------------------------------------------------------------===//
 
@@ -646,5 +647,6 @@ FailureOr<VecScopeMemBarPlan> vecscopemembar::solveVecScopeMemBarPlacement(
     plan.barriers = std::move(kept);
   }
 
+  eliminateTransitiveMemBars(result, plan);
   return plan;
 }
